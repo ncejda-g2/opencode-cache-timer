@@ -1,0 +1,20 @@
+{
+  "name": "opencode-cache-timer",
+  "version": "1.0.0",
+  "description": "Pre-emptive prompt-cache saving extension for OpenCode",
+  "type": "module",
+  "main": "./index.js",
+  "exports": {
+    ".": "./index.js",
+    "./tui": "./tui.js"
+  },
+  "scripts": {
+    "build": "node compile_plugin.js"
+  },
+  "devDependencies": {
+    "@babel/core": "^7.24.0",
+    "@babel/preset-typescript": "^7.24.0",
+    "babel-preset-solid": "^1.8.0"
+  },
+  "license": "MIT"
+}
