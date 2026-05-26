@@ -1,76 +1,69 @@
-# opencode-cache-timer ⚡🕒
+<div align="center">
+  <h1 align="center">opencode-cache-timer ⚡🕒</h1>
 
-An elegant, zero-overhead, pre-emptive **Prompt Cache-Saving extension** for [OpenCode](https://opencode.ai). It monitors your session's inactivity countdown in real-time and proactively triggers a lightweight summary query **exactly 15 seconds before the cache expires**, keeping your hot prompt cache alive or summarizing it so you can cleanly transition to a fresh session.
+  <p align="center">
+    <strong>Live prompt-cache countdown and pre-emptive cache-saving for <a href="https://opencode.ai">OpenCode</a></strong>
+  </p>
 
----
+  <p align="center">
+    <a href="https://www.npmjs.com/package/opencode-cache-timer">
+      <img src="https://img.shields.io/npm/v/opencode-cache-timer?color=9b59b6" alt="npm" />
+    </a>
+    <a href="./CHANGELOG.md">
+      <img src="https://img.shields.io/badge/changelog-Latest%20Changes-blue" alt="Changelog" />
+    </a>
+    <a href="./LICENSE">
+      <img src="https://img.shields.io/badge/license-MIT-green" alt="License" />
+    </a>
+  </p>
 
-## 💡 The Problem: The Massive "Cold Cache" Write Tax
-
-When working on complex, enterprise-grade projects with large codebases, your session context can easily grow to **500k+ input tokens**.
-
-Under Anthropic's official pricing models for **Claude Opus 4.7**:
-*   **Base Input Rate**: $5.00 / Million Tokens
-*   **Prompt Cache Write Fee** (to write new context): **$6.25 / Million Tokens** (1.25x base)
-*   **Prompt Cache Read Fee** (to read hot context): **$0.50 / Million Tokens** (90% discount)
-
-### The Cold Context Penalty (500k Tokens):
-If you walk away from a **500,000 token session** for more than 5 minutes, your prompt cache goes **COLD**.
-*   **Continuing the Cold Session:** Your very next query will cost you **$3.125** just to write that cold context back into memory, plus several seconds of startup latency.
-*   **Subsequent Queries (While Hot):** Read charges drop back down to only **$0.25** per turn.
-
----
-
-## ⚡ The Solution: Pre-emptive Cache Compaction
-
-`opencode-cache-timer` adds an active countdown indicator directly on the right side of your session prompt:
-*   🔥 **Cache: HOT (05:00)** (Red): Active, healthy prompt cache.
-*   ⚠️ **Cache: HOT (00:45)** (Yellow): Less than 1 minute remaining before expiration.
-*   ❄️ **Cache: COLD** (Blue): Cache expired or model changed.
+  <p align="center">
+    <a href="#what-is-it">What is it?</a> •
+    <a href="#-quick-start">Quick Start</a> •
+    <a href="#configuration">Configuration</a> •
+    <a href="./CHANGELOG.md">Changelog</a>
+  </p>
+</div>
 
 ---
 
-## 🔒 Privacy-First: Opt-in Auto-Prompting
-By default, the active visual countdown is enabled, but **the automated background prompt is disabled**. If you want the extension to automatically request summaries and keep your cache hot while you are away, you must explicitly **opt-in** in your configuration.
+## What is it?
 
-### 🧠 Intelligent Automation (When Opted-In):
-If you enable auto-prompting and remain inactive for **4 minutes and 45 seconds** (exactly 15s before the cache shuts down), the plugin automatically:
-1.  Displays a warning toast in the UI.
-2.  Triggers a highly optimized, lightweight background prompt:
-    > *"Summarize our progress and next steps. Be brief."*
-3.  **The Economics:** Because the cache is still **HOT** when this request is sent, Claude reads your massive 500k-token prompt at the ultra-cheap **HOT rate ($0.25 instead of $3.125)**.
-4.  It prints a highly concise, cost-effective summary directly in your session logs.
-5.  **The Net Savings:** You can copy this summary, close the bloated 500k session, open a fresh session, paste it, and keep working with a clean, lightweight context. 
+A TUI plugin that shows a live countdown to your prompt-cache expiry in the OpenCode session bar, and — opt-in — fires a tiny "summarize progress" prompt 15 seconds before the cache goes cold so the cache never actually expires while you're stepping away.
 
-Instead of paying the **$3.125** cold write fee when you return, you paid a tiny **$0.25** hot-read fee to summarize your progress, resulting in a **net savings of $2.87 per timeout occurrence!**
+The countdown indicator on the right side of your prompt:
 
----
+- 🔥 **Cache: HOT (05:00)** — healthy, time remaining
+- ⚠️ **Cache: HOT (00:45)** — under one minute, about to expire
+- ❄️ **Cache: COLD** — expired or model changed
 
-## 🛡️ Built-in Concurrency & Self-Trigger Guardrails
-Unlike naive intervals, this plugin is engineered specifically for terminal UI environments:
-*   **Single-Interval Architecture**: Runs exactly *one* global daemon loop in the plugin module scope, completely preventing duplicate triggers or timing race-conditions if multiple slot panes re-render.
-*   **Human-Only Reset Tracking**: Generates unique trigger timestamps and ignores any incoming message within 10s of a trigger event. The trigger state **only re-arms when a real human user enters a manual prompt**, successfully preventing the auto-prompt from infinitely resetting its own trigger!
+## Features
 
----
+- 🕒 **Live countdown** in `session_prompt_right`, per-model duration
+- 💸 **Pre-emptive auto-summary** (opt-in) — turns a $3.13 cold-write back into a $0.25 hot-read
+- 🧩 **Per-family durations** — single `claude` / `gemini` / `gpt` entries via substring matching
+- 📄 **Sidecar config** — `~/.config/opencode/cache-timer.json` (global) + `./.opencode/cache-timer.json` (project)
+- 🛡️ **Race-safe** — single global tick loop, user-message-count ledger prevents auto-prompt self-retriggering
 
-## 🚀 Quick Start / Installation
+## 🚀 Quick Start
 
-### 1. Install the Plugin
-Drop (or symlink) this plugin's compiled output into opencode's global plugin directory. Opencode auto-loads everything in this folder at startup:
+### 1. Install
 
 ```bash
-# Clone or copy this repo somewhere, then symlink:
+# Symlink this repo into opencode's global plugin dir
 ln -s /path/to/opencode-cache-timer ~/.config/opencode/plugins/cache-timer
 ```
 
-Or copy just the runtime files:
+Or copy the runtime files:
 
 ```bash
 mkdir -p ~/.config/opencode/plugins/cache-timer
 cp tui.js index.js package.json ~/.config/opencode/plugins/cache-timer/
 ```
 
-### 2. Configure (optional)
-The visual timer is active by default. To enable the optional cache-saving auto-prompt or tune per-family cache durations, create a sidecar config file at `~/.config/opencode/cache-timer.json`:
+### 2. (optional) Enable auto-prompting
+
+Create `~/.config/opencode/cache-timer.json`:
 
 ```json
 {
@@ -83,41 +76,54 @@ The visual timer is active by default. To enable the optional cache-saving auto-
 }
 ```
 
-The `durations` map is keyed by **provider family** (substring-matched against the model id, case-insensitive). So `"claude": 300` covers `claude-opus-4-7`, `claude-haiku-4-5`, `claude-3-5-sonnet`, and any other `claude-*` variant.
-
-Per-project overrides can be placed at `./.opencode/cache-timer.json`; project values win over global on a per-field basis.
-
-> **Why a sidecar file instead of `opencode.json`?** Opencode's `opencode.json` validates against a strict JSON schema (`additionalProperties: false` at the top level) and rejects unknown keys, so an inline `cacheTimer: { ... }` block would prevent opencode from starting. The `["file://path", { ...options }]` tuple form is also documented but **does not currently forward options to TUI plugins** in released opencode (verified empirically against v1.15.x; a survey of nine real ecosystem plugins found that **zero** of them use that mechanism). Sidecar JSON files are the de-facto idiomatic pattern, used by `opencode-dcp`, `opencode-vibeguard`, `opencode-sentry-monitor`, and `opencode-notificator`.
+`durations` is keyed by provider family and substring-matched against the model id, so `"claude": 300` covers `claude-opus-4-7`, `claude-haiku-4-5`, `claude-3-5-sonnet`, etc. Per-project overrides live at `./.opencode/cache-timer.json` and win field-by-field over the global file.
 
 ### 3. Restart OpenCode
-Quit your active terminal session and start a fresh instance of `opencode` to load the plugin.
 
----
+Quit and relaunch — you should see a small green "Cache Timer loaded" toast on startup.
+
+## Configuration
+
+| Field              | Type    | Default                                       | Notes                                              |
+| ------------------ | ------- | --------------------------------------------- | -------------------------------------------------- |
+| `enableAutoPrompt` | boolean | `false`                                       | Send the auto-summary prompt 15s before expiry     |
+| `durations`        | object  | `{ claude: 300, gemini: 300, gpt: 300 }`      | Seconds, keyed by provider family (substring)      |
+| `defaultDuration`  | number  | `300`                                         | Fallback when the model doesn't match any family   |
+
+<details>
+<summary><b>Why a sidecar file instead of <code>opencode.json</code>?</b></summary>
+
+Opencode's `opencode.json` validates against a strict JSON schema with `additionalProperties: false` at the top level, so an inline `cacheTimer: { ... }` block would prevent opencode from starting. The documented `["file://path", { ...options }]` plugin-tuple form does not forward options to TUI plugins in released opencode (verified against v1.15.x; an empirical survey of nine ecosystem plugins found that zero of them use that mechanism). Sidecar JSON files are the de-facto idiomatic pattern, used by `opencode-dcp`, `opencode-vibeguard`, `opencode-sentry-monitor`, and `opencode-notificator`.
+
+</details>
+
+<details>
+<summary><b>Pricing math (why this exists)</b></summary>
+
+Claude Opus 4.7 pricing:
+
+| Operation                        | Rate (per Mtoken) |
+| -------------------------------- | ----------------- |
+| Base input                       | $5.00             |
+| Prompt cache **write** (cold)    | $6.25             |
+| Prompt cache **read** (hot)      | $0.50             |
+
+A 500k-token session that goes cold costs **$3.13** just to warm back up. Sending the tiny auto-summary prompt while still hot costs **$0.25** to read the same context. The plugin trades the $3.13 cold-write for a $0.25 hot-read, so **net savings ≈ $2.87 per timeout** for any session you'd otherwise resume.
+
+</details>
 
 ## 🛠️ Building from Source
 
-If you modify the source `cache-timer.tsx` component, you can transpile the TypeScript Solid-JSX code into portable TUI-compliant JavaScript by running:
-
 ```bash
-# Install development compilers
 npm install
-
-# Recompile cache-timer.tsx -> tui.js
-npm run build
+npm run build   # compiles cache-timer.tsx -> tui.js
 ```
 
 ---
 
-## 🚀 Release Process (maintainers)
-
-Releases are fully automated via GitHub Actions (`.github/workflows/publish.yml`). The workflow watches `package.json` on `main`: when its `version` field changes, the workflow tags the commit, creates a GitHub Release, rebuilds `tui.js` from source, and publishes to npm with [provenance](https://docs.npmjs.com/generating-provenance-statements) via OIDC trusted publishing.
-
-To cut a release:
-
-1. Move the relevant `CHANGELOG.md` entries from `[Unreleased]` to a new dated version heading (e.g. `## [1.1.0] - 2026-05-26`).
-2. Bump `version` in `package.json`.
-3. Commit on `main`. The workflow runs automatically.
-
-For recovery (re-running publish for an already-tagged version), use the **Run workflow** button in the Actions tab and pass the version (without leading `v`).
-
-**One-time setup on npm:** configure this package's [Trusted Publisher](https://docs.npmjs.com/trusted-publishers) on npmjs.com to accept OIDC tokens from `ncejda-g2/opencode-cache-timer` → workflow `publish.yml` → environment `npm-publish`. Also create a GitHub Environment named `npm-publish` on the repo (Settings → Environments) — no secrets needed inside it.
+<div align="center">
+  <p>
+    <a href="https://github.com/ncejda-g2/opencode-cache-timer/issues">Report Bug</a> •
+    <a href="https://github.com/ncejda-g2/opencode-cache-timer/issues">Request Feature</a>
+  </p>
+</div>
