@@ -47,7 +47,7 @@ The countdown indicator on the right side of your prompt:
   <img src="docs/assets/cold.png" alt="Cache cold" width="420" />
 </p>
 
-When your session is COLD, you have two choices:
+When your session is COLD, you have three choices:
 
 1. **Pay the cold-start tax** to continue your session, or
 2. **Start a new session** and rebuild context.
