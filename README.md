@@ -54,27 +54,42 @@ Unlike naive intervals, this plugin is engineered specifically for terminal UI e
 
 ## 🚀 Quick Start / Installation
 
-You can add this plugin globally to your personal `opencode.json` configuration.
+### 1. Install the Plugin
+Drop (or symlink) this plugin's compiled output into opencode's global plugin directory. Opencode auto-loads everything in this folder at startup:
 
-### 1. Register the Plugin
-Open your global opencode configuration file (usually located at `~/.config/opencode/opencode.json`) and add the folder path of the extension to the `"plugin"` array. 
+```bash
+# Clone or copy this repo somewhere, then symlink:
+ln -s /path/to/opencode-cache-timer ~/.config/opencode/plugins/cache-timer
+```
 
-By default, the visual timer is active. To enable the optional cache-saving auto-prompts, pass `"enableAutoPrompt": true` in the configuration options:
+Or copy just the runtime files:
+
+```bash
+mkdir -p ~/.config/opencode/plugins/cache-timer
+cp tui.js index.js package.json ~/.config/opencode/plugins/cache-timer/
+```
+
+### 2. Configure (optional)
+The visual timer is active by default. To enable the optional cache-saving auto-prompt or tune per-family cache durations, create a sidecar config file at `~/.config/opencode/cache-timer.json`:
 
 ```json
 {
-  "$schema": "https://opencode.ai/config.json",
-  "plugin": [
-    ["file:///Users/YOUR_USERNAME/github/opencode-cache-timer", {
-      "enableAutoPrompt": true
-    }]
-  ]
+  "enableAutoPrompt": true,
+  "durations": {
+    "claude": 300,
+    "gemini": 300,
+    "gpt": 300
+  }
 }
 ```
 
-*Replace `YOUR_USERNAME` with your actual system username. If installing from npm (once published), use `"opencode-cache-timer"` instead of the `file:///` path.*
+The `durations` map is keyed by **provider family** (substring-matched against the model id, case-insensitive). So `"claude": 300` covers `claude-opus-4-7`, `claude-haiku-4-5`, `claude-3-5-sonnet`, and any other `claude-*` variant.
 
-### 2. Restart OpenCode
+Per-project overrides can be placed at `./.opencode/cache-timer.json`; project values win over global on a per-field basis.
+
+> **Why a sidecar file instead of `opencode.json`?** Opencode's `opencode.json` validates against a strict JSON schema (`additionalProperties: false` at the top level) and rejects unknown keys, so an inline `cacheTimer: { ... }` block would prevent opencode from starting. The `["file://path", { ...options }]` tuple form is also documented but **does not currently forward options to TUI plugins** in released opencode (verified empirically against v1.15.x; a survey of nine real ecosystem plugins found that **zero** of them use that mechanism). Sidecar JSON files are the de-facto idiomatic pattern, used by `opencode-dcp`, `opencode-vibeguard`, `opencode-sentry-monitor`, and `opencode-notificator`.
+
+### 3. Restart OpenCode
 Quit your active terminal session and start a fresh instance of `opencode` to load the plugin.
 
 ---
