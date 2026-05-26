@@ -31,6 +31,22 @@
 
 A TUI plugin that shows a live countdown to your prompt-cache expiry in the OpenCode session bar.
 
+The countdown indicator on the right side of your prompt:
+
+- 🔥 **Cache: HOT (05:00)** — healthy, time remaining
+- ⚠️ **Cache: HOT (00:59)** — under one minute, about to expire
+- ❄️ **Cache: COLD** — expired or model changed
+
+<p align="center">
+  <img src="docs/assets/hot_cache.png" alt="Hot cache, time remaining" width="420" />
+</p>
+<p align="center">
+  <img src="docs/assets/less_than_one_min.png" alt="Less than one minute remaining" width="420" />
+</p>
+<p align="center">
+  <img src="docs/assets/cold.png" alt="Cache cold" width="420" />
+</p>
+
 When your session is COLD, you have two choices:
 
 1. **Pay the cold-start tax** to continue your session, or
@@ -41,12 +57,6 @@ When your session is COLD, you have two choices:
 * On **latency**, resuming wins — one up-front cold-write hit beats several `Read` round-trips in a fresh session. Worth paying if you're coming back to do one quick thing and don't need to maximize savings.
 
 The plugin also **optionally** helps make it easier to start a fresh session (off by default — see [Configuration](#configuration) to enable). If enabled, it fires a tiny "summarize progress" prompt 15 seconds before the cache goes cold, capturing a hot-read summary you can paste into a fresh session to skip the cold-start write tax of resuming the bloated original.
-
-The countdown indicator on the right side of your prompt:
-
-- 🔥 **Cache: HOT (05:00)** — healthy, time remaining
-- ⚠️ **Cache: HOT (00:45)** — under one minute, about to expire
-- ❄️ **Cache: COLD** — expired or model changed
 
 ## Why this exists
 
