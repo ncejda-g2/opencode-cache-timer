@@ -105,3 +105,19 @@ npm install
 # Recompile cache-timer.tsx -> tui.js
 npm run build
 ```
+
+---
+
+## 🚀 Release Process (maintainers)
+
+Releases are fully automated via GitHub Actions (`.github/workflows/publish.yml`). The workflow watches `package.json` on `main`: when its `version` field changes, the workflow tags the commit, creates a GitHub Release, rebuilds `tui.js` from source, and publishes to npm with [provenance](https://docs.npmjs.com/generating-provenance-statements) via OIDC trusted publishing.
+
+To cut a release:
+
+1. Move the relevant `CHANGELOG.md` entries from `[Unreleased]` to a new dated version heading (e.g. `## [1.1.0] - 2026-05-26`).
+2. Bump `version` in `package.json`.
+3. Commit on `main`. The workflow runs automatically.
+
+For recovery (re-running publish for an already-tagged version), use the **Run workflow** button in the Actions tab and pass the version (without leading `v`).
+
+**One-time setup on npm:** configure this package's [Trusted Publisher](https://docs.npmjs.com/trusted-publishers) on npmjs.com to accept OIDC tokens from `ncejda-g2/opencode-cache-timer` → workflow `publish.yml` → environment `npm-publish`. Also create a GitHub Environment named `npm-publish` on the repo (Settings → Environments) — no secrets needed inside it.

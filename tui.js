@@ -135,8 +135,7 @@ const tui = async (api, _options, _meta) => {
   api.ui.toast({
     variant: "success",
     title: "Cache Timer loaded",
-    message: `auto=${enableAutoPrompt} durations=${JSON.stringify(cacheDurations)}`,
-    duration: 5000
+    duration: 3000
   });
   api.slots.register({
     slots: {

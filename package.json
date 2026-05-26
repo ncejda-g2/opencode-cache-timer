@@ -8,13 +8,44 @@
     ".": "./index.js",
     "./tui": "./tui.js"
   },
+  "files": [
+    "index.js",
+    "tui.js",
+    "cache-timer.tsx",
+    "README.md",
+    "CHANGELOG.md",
+    "LICENSE"
+  ],
   "scripts": {
     "build": "node compile_plugin.js"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ncejda-g2/opencode-cache-timer.git"
+  },
+  "bugs": {
+    "url": "https://github.com/ncejda-g2/opencode-cache-timer/issues"
+  },
+  "homepage": "https://github.com/ncejda-g2/opencode-cache-timer#readme",
+  "author": "Nicholas Cejda <ncejda@g2.com>",
+  "license": "MIT",
+  "keywords": [
+    "opencode",
+    "opencode-plugin",
+    "cache",
+    "claude",
+    "gemini",
+    "gpt",
+    "prompt-cache",
+    "tui"
+  ],
+  "publishConfig": {
+    "access": "public",
+    "provenance": true
   },
   "devDependencies": {
     "@babel/core": "^7.24.0",
     "@babel/preset-typescript": "^7.24.0",
     "babel-preset-solid": "^1.8.0"
-  },
-  "license": "MIT"
+  }
 }
