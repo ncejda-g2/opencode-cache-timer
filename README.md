@@ -29,7 +29,18 @@
 
 ## What is it?
 
-A TUI plugin that shows a live countdown to your prompt-cache expiry in the OpenCode session bar, and — opt-in — fires a tiny "summarize progress" prompt 15 seconds before the cache goes cold so the cache never actually expires while you're stepping away.
+A TUI plugin that shows a live countdown to your prompt-cache expiry in the OpenCode session bar.
+
+When your session is COLD, you have two choices:
+
+1. **Pay the cold-start tax** to continue your session, or
+2. **Start a new session** and rebuild context.
+3. **Drop the session entirely**. Move on. Might not be worth continuing this session at all.
+
+* On **cost**, starting fresh almost always wins — especially over 100k input tokens (see chart).
+* On **latency**, resuming wins — one up-front cold-write hit beats several `Read` round-trips in a fresh session. Worth paying if you're coming back to do one quick thing and don't need to maximize savings.
+
+The plugin also **optionally** helps make it easier to start a fresh session (off by default — see [Configuration](#configuration) to enable). If enabled, it fires a tiny "summarize progress" prompt 15 seconds before the cache goes cold, capturing a hot-read summary you can paste into a fresh session to skip the cold-start write tax of resuming the bloated original.
 
 The countdown indicator on the right side of your prompt:
 
@@ -37,33 +48,34 @@ The countdown indicator on the right side of your prompt:
 - ⚠️ **Cache: HOT (00:45)** — under one minute, about to expire
 - ❄️ **Cache: COLD** — expired or model changed
 
-## Features
+## Why this exists
 
-- 🕒 **Live countdown** in `session_prompt_right`, per-model duration
-- 💸 **Pre-emptive auto-summary** (opt-in) — turns a $3.13 cold-write back into a $0.25 hot-read
-- 🧩 **Per-family durations** — single `claude` / `gemini` / `gpt` entries via substring matching
-- 📄 **Sidecar config** — `~/.config/opencode/cache-timer.json` (global) + `./.opencode/cache-timer.json` (project)
-- 🛡️ **Race-safe** — single global tick loop, user-message-count ledger prevents auto-prompt self-retriggering
+When a 500k-token session goes cold, just *resuming* it costs **$3.12** in cold-write fees before you've done any new work. The auto-summary path — hot-read the existing context to produce a summary, paste it into a fresh session — costs **$0.69** under realistic assumptions (50k startup tokens, 1k summary paste, 5 file re-reads at 1000 LOC each). **Savings of ~$2.43 per timeout you would have otherwise resumed,** scaling linearly with session size:
+
+<p align="center">
+  <img src="docs/assets/cost-comparison.svg" alt="Cost of resuming a cold session vs. summary + fresh session — under realistic fresh-session assumptions the summary path saves ~$2.43 at 500k tokens and the gap widens with larger originals" width="700" />
+</p>
+
+> **When resume actually wins:** rarely on cost — you'd need to re-read essentially the entire original session in the fresh one for the math to flip, which almost never happens. The real argument for resuming is **latency**: a cold-write is a single up-front wall-clock hit, while a fresh session can spend the first several turns making `Read` calls to rebuild context the original already had. If you're coming back to do one quick thing and want to start immediately, just pay the tax if you can afford the extra cost.
+
+> **The auto-summary is OFF by default.** It requires explicit opt-in so the plugin never spends your tokens without permission. See [Configuration](#configuration) to enable it.
 
 ## 🚀 Quick Start
 
-### 1. Install
+Add the package to the `plugin` array in your `opencode.json`:
 
-```bash
-# Symlink this repo into opencode's global plugin dir
-ln -s /path/to/opencode-cache-timer ~/.config/opencode/plugins/cache-timer
+```json
+{
+  "$schema": "https://opencode.ai/config.json",
+  "plugin": ["opencode-cache-timer"]
+}
 ```
 
-Or copy the runtime files:
+OpenCode auto-installs npm plugins via Bun at startup. Restart OpenCode and you should see a green "Cache Timer loaded" toast.
 
-```bash
-mkdir -p ~/.config/opencode/plugins/cache-timer
-cp tui.js index.js package.json ~/.config/opencode/plugins/cache-timer/
-```
+## Configuration
 
-### 2. (optional) Enable auto-prompting
-
-Create `~/.config/opencode/cache-timer.json`:
+The visual countdown works out of the box with no configuration. To enable the auto-summary, create `~/.config/opencode/cache-timer.json`:
 
 ```json
 {
@@ -76,39 +88,18 @@ Create `~/.config/opencode/cache-timer.json`:
 }
 ```
 
-`durations` is keyed by provider family and substring-matched against the model id, so `"claude": 300` covers `claude-opus-4-7`, `claude-haiku-4-5`, `claude-3-5-sonnet`, etc. Per-project overrides live at `./.opencode/cache-timer.json` and win field-by-field over the global file.
+| Field              | Type    | Default                                       | Notes                                                                  |
+| ------------------ | ------- | --------------------------------------------- | ---------------------------------------------------------------------- |
+| `enableAutoPrompt` | boolean | `false`                                       | **Off by default.** Set `true` to send the auto-summary 15s pre-expiry |
+| `durations`        | object  | `{ claude: 300, gemini: 300, gpt: 300 }`      | Seconds, keyed by provider family (substring-matched against model id) |
+| `defaultDuration`  | number  | `300`                                         | Fallback when the model doesn't match any family                       |
 
-### 3. Restart OpenCode
-
-Quit and relaunch — you should see a small green "Cache Timer loaded" toast on startup.
-
-## Configuration
-
-| Field              | Type    | Default                                       | Notes                                              |
-| ------------------ | ------- | --------------------------------------------- | -------------------------------------------------- |
-| `enableAutoPrompt` | boolean | `false`                                       | Send the auto-summary prompt 15s before expiry     |
-| `durations`        | object  | `{ claude: 300, gemini: 300, gpt: 300 }`      | Seconds, keyed by provider family (substring)      |
-| `defaultDuration`  | number  | `300`                                         | Fallback when the model doesn't match any family   |
+Per-project overrides live at `./.opencode/cache-timer.json` and win field-by-field over the global file. `"claude": 300` covers `claude-opus-4-7`, `claude-haiku-4-5`, `claude-3-5-sonnet`, etc.
 
 <details>
 <summary><b>Why a sidecar file instead of <code>opencode.json</code>?</b></summary>
 
 Opencode's `opencode.json` validates against a strict JSON schema with `additionalProperties: false` at the top level, so an inline `cacheTimer: { ... }` block would prevent opencode from starting. The documented `["file://path", { ...options }]` plugin-tuple form does not forward options to TUI plugins in released opencode (verified against v1.15.x; an empirical survey of nine ecosystem plugins found that zero of them use that mechanism). Sidecar JSON files are the de-facto idiomatic pattern, used by `opencode-dcp`, `opencode-vibeguard`, `opencode-sentry-monitor`, and `opencode-notificator`.
-
-</details>
-
-<details>
-<summary><b>Pricing math (why this exists)</b></summary>
-
-Claude Opus 4.7 pricing:
-
-| Operation                        | Rate (per Mtoken) |
-| -------------------------------- | ----------------- |
-| Base input                       | $5.00             |
-| Prompt cache **write** (cold)    | $6.25             |
-| Prompt cache **read** (hot)      | $0.50             |
-
-A 500k-token session that goes cold costs **$3.13** just to warm back up. Sending the tiny auto-summary prompt while still hot costs **$0.25** to read the same context. The plugin trades the $3.13 cold-write for a $0.25 hot-read, so **net savings ≈ $2.87 per timeout** for any session you'd otherwise resume.
 
 </details>
 
