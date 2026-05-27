@@ -1,10 +1,46 @@
 # Changelog
 
-All notable changes to `opencode-cache-timer` are documented here. The format is
+All notable changes to `cache-timer` are documented here. The format is
 loosely based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+
+## [1.1.0] - 2026-05-26
+
+### Added
+- **Clickable "↻ Refresh" button** in `session_prompt_right`. Sends a tiny
+  `say 'refresh'` prompt to the current session on click, giving users a
+  manual one-click way to keep the prompt cache hot without typing anything.
+  In-flight requests dim the button and swap the label to `Sending...` until
+  the prompt resolves. A `refreshInFlight` signal debounces rapid clicks so a
+  single click can't queue multiple prompts. Hidden when the cache is COLD
+  (clicking would pay full cold-cache tax for no benefit — the worst-case
+  action this plugin exists to prevent); visible on HOT, WARNING, and BUSY.
+- **Clickable "✨ New chat" button** in `session_prompt_right`. Creates a brand-
+  new session seeded with a tiny continuation prompt built from the current
+  session's last user message, last assistant reply, and up to five most-
+  recently `read` file paths, then auto-navigates the TUI to that new session.
+  The motivation is to give users an escape hatch from a stale, expensive
+  session WITHOUT inheriting its cold-cache tax. Inherits the source session's
+  model so the new chat picks up with the same provider/model. **Visible only
+  on COLD** — on HOT/WARNING/BUSY the 90% hot-read discount makes continuing
+  strictly cheaper than forking, so the button hides to avoid luring users into
+  a more expensive path. (Users who want a clean fork on hot can still use the
+  built-in `/new` slash command.) Per-click debouncing via `newChatInFlight`
+  mirrors the Refresh button. While in-flight, the label shows an animated
+  braille spinner (`Starting... ⠋`) on a dedicated 100ms interval — cold-cache
+  TTFT on Opus can be 30-60s, and motion confirms the click registered.
+- **Semantic `CacheState` enum** (`"hot" | "warning" | "cold" | "busy"`) written
+  once per tick by the countdown loop and read by button visibility predicates.
+  Replaces string-matching on the display label and makes future state /
+  visibility rules a one-line change at the predicate site.
+- **Inline button layout.** Buttons and timer text render on a single row via
+  `flexDirection="row"` and `gap={1}` (order: New chat → Refresh → timer).
+
+### Notes
+- Mouse support depends on the host terminal: iTerm2, kitty, Alacritty,
+  WezTerm, and modern Terminal.app all forward `onMouseUp` correctly.
 
 ## [1.0.0] - 2026-05-26
 

@@ -1,13 +1,13 @@
 <div align="center">
-  <h1 align="center">opencode-cache-timer ⚡🕒</h1>
+  <h1 align="center">cache-timer ⚡🕒</h1>
 
   <p align="center">
     <strong>Live prompt-cache countdown and pre-emptive cache-saving for <a href="https://opencode.ai">OpenCode</a></strong>
   </p>
 
   <p align="center">
-    <a href="https://www.npmjs.com/package/opencode-cache-timer">
-      <img src="https://img.shields.io/npm/v/opencode-cache-timer?color=9b59b6" alt="npm" />
+    <a href="https://www.npmjs.com/package/cache-timer">
+      <img src="https://img.shields.io/npm/v/cache-timer?color=9b59b6" alt="npm" />
     </a>
     <a href="./CHANGELOG.md">
       <img src="https://img.shields.io/badge/changelog-Latest%20Changes-blue" alt="Changelog" />
@@ -31,36 +31,44 @@
 
 A TUI plugin that shows a live countdown to your prompt-cache expiry in the OpenCode session bar.
 
-The countdown indicator on the right side of your prompt:
+The countdown indicator and (depending on state) one clickable button sit on the right side of your prompt. The plugin's rule of thumb expressed as UI: **hot cache → keep going; cold cache → fork.**
 
-- 🔥 **Cache: HOT (05:00)** — healthy, time remaining
-- ⚠️ **Cache: HOT (00:59)** — under one minute, about to expire
-- ❄️ **Cache: COLD** — expired or model changed
+- 🔥 **Cache: HOT (05:00)** — healthy, time remaining. **↻ Refresh** is the only button shown (the 90% hot-read discount makes continuing cheaper than forking, so **✨ New chat** stays hidden).
+- ⚠️ **Cache: HOT (00:59)** — under one minute, about to expire. Cost math is identical to HOT — only the color changes. **↻ Refresh** still shown.
+- ❄️ **Cache: COLD** — expired or model changed. **✨ New chat** is the only button shown (forking now is strictly cheaper than paying the cold-write tax to resume).
+- ⏳ **Starting...** — animated spinner shown while a new chat is being seeded and the TUI navigates to it.
 
 <p align="center">
-  <img src="docs/assets/hot_cache.png" alt="Hot cache, time remaining" width="420" />
+  <img src="docs/assets/buttons_hot.png" alt="HOT cache with New chat and Refresh buttons" width="640" />
 </p>
 <p align="center">
-  <img src="docs/assets/less_than_one_min.png" alt="Less than one minute remaining" width="420" />
+  <img src="docs/assets/buttons_warning.png" alt="Cache under one minute, both buttons still visible" width="640" />
 </p>
 <p align="center">
-  <img src="docs/assets/cold.png" alt="Cache cold" width="420" />
+  <img src="docs/assets/buttons_cold.png" alt="COLD cache, only New chat button visible" width="640" />
+</p>
+<p align="center">
+  <img src="docs/assets/buttons_starting.png" alt="Starting... spinner while seeding a new chat" width="640" />
 </p>
 
 When your session is COLD, you have three choices:
 
 1. **Pay the cold-start tax** to continue your session, or
-2. **Start a new session** and rebuild context.
+2. **Start a new session** and rebuild context — one click on **✨ New chat**.
 3. **Drop the session entirely**. Move on. Might not be worth continuing this session at all.
 
 * On **cost**, starting fresh almost always wins — especially over 100k input tokens (see chart).
 * On **latency**, resuming wins — one up-front cold-write hit beats several `Read` round-trips in a fresh session. Worth paying if you're coming back to do one quick thing and don't need to maximize savings.
 
-The plugin also **optionally** helps make it easier to start a fresh session (off by default — see [Configuration](#configuration) to enable). If enabled, it fires a tiny "summarize progress" prompt 15 seconds before the cache goes cold, capturing a hot-read summary you can paste into a fresh session to skip the cold-start write tax of resuming the bloated original.
+**✨ New chat** automates choice #2: it spins up a brand-new session seeded with a tiny continuation prompt (last user message, last assistant reply, and up to 5 most-recently `read` file paths) and auto-navigates the TUI to it. Inherits the source session's model.
+
+**↻ Refresh** sends a no-op prompt to the current session to keep the cache hot; it's hidden once the cache goes COLD because clicking it then would pay the full cold-write tax — the exact action this plugin exists to prevent.
+
+The plugin also **optionally** helps make it easier to start a smarter fresh session with summarized context (off by default — see [Configuration](#configuration) to enable). If enabled, it fires a tiny "summarize progress" prompt 15 seconds before the cache goes cold, capturing a hot-read summary which is naturally picked up as the assistant reply that **✨ New chat** seeds the fresh session from. This allows you to skip the cold-start write tax of resuming the bloated original while maximizing chat continuity and minimizing cost.
 
 ## Why this exists
 
-When a 500k-token session goes cold, just *resuming* it costs **$3.12** in cold-write fees before you've done any new work. The auto-summary path — hot-read the existing context to produce a summary, paste it into a fresh session — costs **$0.69** under realistic assumptions (50k startup tokens, 1k summary paste, 5 file re-reads at 1000 LOC each). **Savings of ~$2.43 per timeout you would have otherwise resumed,** scaling linearly with session size:
+When a 500k-token session goes cold, just *resuming* an Opus 4.7 session costs **$3.12** in cold-write fees before you've done any new work. The auto-summary path — hot-read the existing context to produce a summary, paste it into a fresh session — costs **$0.69** under realistic assumptions (50k startup tokens, 1k summary paste, 5 file re-reads at 1000 LOC each). **Savings of ~$2.43 per timeout you would have otherwise resumed,** scaling linearly with session size:
 
 <p align="center">
   <img src="docs/assets/cost-comparison.svg" alt="Cost of resuming a cold session vs. summary + fresh session — under realistic fresh-session assumptions the summary path saves ~$2.43 at 500k tokens and the gap widens with larger originals" width="700" />
@@ -77,7 +85,7 @@ Add the package to the `plugin` array in your `opencode.json`:
 ```json
 {
   "$schema": "https://opencode.ai/config.json",
-  "plugin": ["opencode-cache-timer"]
+  "plugin": ["cache-timer"]
 }
 ```
 
@@ -105,13 +113,6 @@ The visual countdown works out of the box with no configuration. To enable the a
 | `defaultDuration`  | number  | `300`                                         | Fallback when the model doesn't match any family                       |
 
 Per-project overrides live at `./.opencode/cache-timer.json` and win field-by-field over the global file. `"claude": 300` covers `claude-opus-4-7`, `claude-haiku-4-5`, `claude-3-5-sonnet`, etc.
-
-<details>
-<summary><b>Why a sidecar file instead of <code>opencode.json</code>?</b></summary>
-
-Opencode's `opencode.json` validates against a strict JSON schema with `additionalProperties: false` at the top level, so an inline `cacheTimer: { ... }` block would prevent opencode from starting. The documented `["file://path", { ...options }]` plugin-tuple form does not forward options to TUI plugins in released opencode (verified against v1.15.x; an empirical survey of nine ecosystem plugins found that zero of them use that mechanism). Sidecar JSON files are the de-facto idiomatic pattern, used by `opencode-dcp`, `opencode-vibeguard`, `opencode-sentry-monitor`, and `opencode-notificator`.
-
-</details>
 
 ## 🛠️ Building from Source
 
