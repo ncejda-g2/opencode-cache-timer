@@ -23,12 +23,14 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
   recently `read` file paths, then auto-navigates the TUI to that new session.
   The motivation is to give users an escape hatch from a stale, expensive
   session WITHOUT inheriting its cold-cache tax. Inherits the source session's
-  model so the new chat picks up with the same provider/model. Hidden only
-  when the source session has no messages yet; visible across HOT, WARNING,
-  COLD, and BUSY. Per-click debouncing via `newChatInFlight` mirrors the
-  Refresh button. While in-flight, the label shows an animated braille
-  spinner (`Starting... ⠋`) on a dedicated 100ms interval — cold-cache TTFT
-  on Opus can be 30-60s, and motion confirms the click registered.
+  model so the new chat picks up with the same provider/model. **Visible only
+  on COLD** — on HOT/WARNING/BUSY the 90% hot-read discount makes continuing
+  strictly cheaper than forking, so the button hides to avoid luring users into
+  a more expensive path. (Users who want a clean fork on hot can still use the
+  built-in `/new` slash command.) Per-click debouncing via `newChatInFlight`
+  mirrors the Refresh button. While in-flight, the label shows an animated
+  braille spinner (`Starting... ⠋`) on a dedicated 100ms interval — cold-cache
+  TTFT on Opus can be 30-60s, and motion confirms the click registered.
 - **Semantic `CacheState` enum** (`"hot" | "warning" | "cold" | "busy"`) written
   once per tick by the countdown loop and read by button visibility predicates.
   Replaces string-matching on the display label and makes future state /

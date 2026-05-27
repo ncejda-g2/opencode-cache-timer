@@ -31,11 +31,11 @@
 
 A TUI plugin that shows a live countdown to your prompt-cache expiry in the OpenCode session bar.
 
-The countdown indicator and two clickable buttons sit on the right side of your prompt:
+The countdown indicator and (depending on state) one clickable button sit on the right side of your prompt. The plugin's rule of thumb expressed as UI: **hot cache → keep going; cold cache → fork.**
 
-- 🔥 **Cache: HOT (05:00)** — healthy, time remaining. Both **✨ New chat** and **↻ Refresh** buttons available.
-- ⚠️ **Cache: HOT (00:59)** — under one minute, about to expire. Both buttons still available.
-- ❄️ **Cache: COLD** — expired or model changed. **↻ Refresh** is hidden (clicking it would pay the full cold-cache tax); **✨ New chat** stays.
+- 🔥 **Cache: HOT (05:00)** — healthy, time remaining. **↻ Refresh** is the only button shown (the 90% hot-read discount makes continuing cheaper than forking, so **✨ New chat** stays hidden).
+- ⚠️ **Cache: HOT (00:59)** — under one minute, about to expire. Cost math is identical to HOT — only the color changes. **↻ Refresh** still shown.
+- ❄️ **Cache: COLD** — expired or model changed. **✨ New chat** is the only button shown (forking now is strictly cheaper than paying the cold-write tax to resume).
 - ⏳ **Starting...** — animated spinner shown while a new chat is being seeded and the TUI navigates to it.
 
 <p align="center">

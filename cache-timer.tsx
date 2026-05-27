@@ -617,7 +617,15 @@ const tui: TuiPlugin = async (api, _options, _meta) => {
           stopSpinner()
         })
 
-        // Visibility rules (derived from cacheState + hasMessages):
+        // Visibility rules (derived from cacheState + hasMessages).
+        //
+        // The plugin's thesis, expressed as UI: "Hot cache → keep going.
+        // Cold cache → fork." On a hot cache, continuing is unambiguously
+        // cheaper than forking because the 90% hot-read discount eats the
+        // bloat. On a cold cache, forking is cheaper because both branches
+        // owe full-price tokens for *something*, and the fresh branch is
+        // smaller. Each state therefore exposes exactly one button — the
+        // recommended action — and hides the other.
         //
         //   Refresh button:
         //     - HIDDEN on COLD: clicking it would just pay full cold-cache
@@ -629,12 +637,16 @@ const tui: TuiPlugin = async (api, _options, _meta) => {
         //
         //   New chat button:
         //     - HIDDEN when there are no messages: nothing to seed from.
-        //     - Shown on COLD, WARNING, HOT, BUSY: starting fresh is always a
-        //       valid escape hatch (and the *primary* action on COLD). On BUSY
-        //       the seed will capture whatever the assistant has streamed so
-        //       far; hiding the button mid-stream just adds UI noise.
+        //     - HIDDEN on HOT, WARNING, and BUSY: while the cache is hot,
+        //       forking is *more expensive* than continuing (you pay full
+        //       price to rebuild context in the new session, vs the 10% hot
+        //       rate to keep going). WARNING is just HOT with less time left
+        //       — the cost math is identical, only the color changes. Users
+        //       who explicitly want a clean fork on hot can still type /new.
+        //     - Shown on COLD: this is the *primary* action when the cache
+        //       has expired — fork instead of paying the cold-write tax.
         const showRefresh = () => cacheState() !== "cold"
-        const showNewChat = () => hasMessages()
+        const showNewChat = () => hasMessages() && cacheState() === "cold"
 
         return (
           // flexDirection="row" lays the buttons and timer text on a single
