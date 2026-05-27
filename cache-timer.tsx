@@ -1,7 +1,7 @@
 /** @jsxImportSource @opentui/solid */
 import { type JSX } from "@opentui/solid"
 import { createSignal, onCleanup } from "solid-js"
-import type { TuiPlugin, TuiPluginModule } from "@opencode-ai/plugin/tui"
+import type { TuiPlugin, TuiPluginApi, TuiPluginModule } from "@opencode-ai/plugin/tui"
 import { appendFileSync, readFileSync, existsSync } from "node:fs"
 import { homedir } from "node:os"
 import { join } from "node:path"
@@ -100,12 +100,126 @@ function getCacheDuration(modelId: string | undefined): number {
   return defaultDuration;
 }
 
+// Build the seed prompt for a brand-new chat that picks up where a stale
+// session left off WITHOUT inheriting the cold-cache tax of that session.
+//
+// The shape is intentionally minimal: the goal is to give the assistant just
+// enough context to ask a useful "what next?" question, NOT to recreate the
+// prior conversation. We pull three things from the source session via
+// `api.state` (cheap, in-memory; no extra API round-trips):
+//
+//   1. The text of the most recent user message
+//   2. The text of the most recent assistant reply
+//   3. Up to 5 file paths the model has most recently `read` (the read tool's
+//      `filePath` input parameter — falling back to `path` for safety across
+//      tool schema versions)
+//
+// Returns null when there isn't a coherent last exchange (no user message,
+// no assistant message) — in that case the caller should suppress the
+// "New chat" button entirely rather than seed an empty/awkward prompt.
+function buildSeedPrompt(
+  api: TuiPluginApi,
+  sourceSessionID: string,
+): string | null {
+  const messages = api.state.session.messages(sourceSessionID);
+  if (!messages || messages.length === 0) return null;
+
+  // Find the last user and last assistant messages. We scan from the tail so
+  // an in-flight assistant reply (currently streaming) is preferred over an
+  // older completed one, matching the user's mental model of "the assistant's
+  // most recent response".
+  let lastUserMsg: typeof messages[number] | undefined;
+  let lastAssistantMsg: typeof messages[number] | undefined;
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const m = messages[i];
+    if (!lastAssistantMsg && m.role === "assistant") lastAssistantMsg = m;
+    if (!lastUserMsg && m.role === "user") lastUserMsg = m;
+    if (lastUserMsg && lastAssistantMsg) break;
+  }
+  if (!lastUserMsg || !lastAssistantMsg) return null;
+
+  // Extract text content from a message's parts. Messages themselves carry no
+  // text — text lives in TextPart records addressed by messageID. We join all
+  // text parts (a single assistant turn can emit multiple text parts when
+  // tool calls are interleaved) and skip synthetic/ignored ones.
+  const messageText = (messageID: string): string => {
+    const parts = api.state.part(messageID);
+    if (!parts) return "";
+    const chunks: string[] = [];
+    for (const p of parts) {
+      if (p.type === "text" && !p.synthetic && !p.ignored) {
+        chunks.push(p.text);
+      }
+    }
+    return chunks.join("\n").trim();
+  };
+
+  const lastUserText = messageText(lastUserMsg.id);
+  const lastAssistantText = messageText(lastAssistantMsg.id);
+
+  // Collect the most recently read file paths across the whole session.
+  // `read` is opencode's built-in file-read tool; its `input.filePath` is the
+  // absolute path. We walk messages newest -> oldest and dedupe, preserving
+  // first-seen order so the list reflects recency. Capped at 5 to keep the
+  // seed prompt small (we paid the cost of cold-starting a new session
+  // precisely to keep this prompt tiny).
+  const recentReadFiles: string[] = [];
+  const seenPaths = new Set<string>();
+  outer: for (let i = messages.length - 1; i >= 0; i--) {
+    const parts = api.state.part(messages[i].id);
+    if (!parts) continue;
+    for (let j = parts.length - 1; j >= 0; j--) {
+      const part = parts[j];
+      if (part.type !== "tool") continue;
+      if (part.tool !== "read") continue;
+      // Tool input keys have varied across opencode versions; check both
+      // `filePath` (current) and `path` (older) before giving up.
+      const input = part.state?.input as Record<string, unknown> | undefined;
+      const candidate =
+        (typeof input?.filePath === "string" ? input.filePath : undefined) ??
+        (typeof input?.path === "string" ? input.path : undefined);
+      if (!candidate) continue;
+      if (seenPaths.has(candidate)) continue;
+      seenPaths.add(candidate);
+      recentReadFiles.push(candidate);
+      if (recentReadFiles.length >= 5) break outer;
+    }
+  }
+
+  const filesBlock =
+    recentReadFiles.length > 0
+      ? recentReadFiles.map((p) => `- ${p}`).join("\n")
+      : "(none recorded)";
+
+  return [
+    "We are continuing from a previous work session. But we don't know yet what the user wants to do next.",
+    "",
+    `The last user request was:`,
+    lastUserText || "(no text content recorded)",
+    "",
+    `The agent responded to that request with:`,
+    lastAssistantText || "(no text content recorded)",
+    "",
+    `The most-recently-referenced documents were:`,
+    filesBlock,
+    "",
+    "Ask the user what they would like to work on next given this context.",
+  ].join("\n");
+}
+
 // Helper to format remaining seconds as MM:SS
 function formatTimeText(totalSeconds: number): string {
   const minutes = Math.floor(totalSeconds / 60)
   const calculatedSeconds = Math.floor(totalSeconds % 60)
   return `${String(minutes).padStart(2, "0")}:${String(calculatedSeconds).padStart(2, "0")}`
 }
+
+// Cache state is the *semantic* signal that the ticker derives every second.
+// All UI affordances (text, color, button visibility) read from this single
+// enum instead of string-matching on the display label. Keeping it explicit
+// also makes it cheap to add new states (e.g. "expired-grace") later without
+// hunting through conditional UI code.
+type CacheState = "hot" | "warning" | "cold" | "busy";
 
 // Module-level session-keyed states to ensure absolute isolation across multiple sessions
 const triggeredSessions = new Set<string>();
@@ -175,14 +289,42 @@ const tui: TuiPlugin = async (api, _options, _meta) => {
 
         const [timeText, setTimeText] = createSignal(`Cache: HOT (${formatTimeText(initialDuration)})`)
         const [color, setColor] = createSignal("#EF4444") // Red (HOT)
+        // Semantic cache state. The ticker is the single writer; both buttons
+        // read it to decide their own visibility. See CacheState type comment.
+        const [cacheState, setCacheState] = createSignal<CacheState>("hot")
+        // Track whether the source session has any messages yet. Required for
+        // the "New chat" button: there's nothing to seed from in an empty
+        // session, so we hide the button rather than emit an empty seed prompt.
+        const [hasMessages, setHasMessages] = createSignal(messagesOnMount && messagesOnMount.length > 0)
 
-        // Refresh button state.
-        // - hovered: drives border color change as hover affordance
-        // - inFlight: guards against rapid double-clicks spamming the session
-        //   (the prompt API is async; clicking again before it resolves would
-        //   queue a second user message and undo our cache-preservation goal)
-        const [refreshHovered, setRefreshHovered] = createSignal(false)
+        // Per-button in-flight flags guard against double-clicks spamming the
+        // session (the prompt/create APIs are async; a second click before the
+        // first resolves would race and undo our cache-preservation goal).
         const [refreshInFlight, setRefreshInFlight] = createSignal(false)
+        const [newChatInFlight, setNewChatInFlight] = createSignal(false)
+
+        // Animated spinner frame driver for the "Starting..." button label.
+        // Cold-cache TTFT on Opus via LiteLLM can be 30-60s; without motion
+        // the button looks frozen and users wonder if the click registered.
+        // Dedicated interval (not the 1s ticker) for 100ms frames; gated on
+        // newChatInFlight so it only burns CPU during the brief in-flight
+        // window. Cleared in onCleanup with the main ticker.
+        const SPINNER_FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
+        const [spinnerFrame, setSpinnerFrame] = createSignal(0)
+        let spinnerInterval: ReturnType<typeof setInterval> | null = null
+        const startSpinner = () => {
+          if (spinnerInterval) return
+          spinnerInterval = setInterval(() => {
+            setSpinnerFrame((f) => (f + 1) % SPINNER_FRAMES.length)
+          }, 100)
+        }
+        const stopSpinner = () => {
+          if (spinnerInterval) {
+            clearInterval(spinnerInterval)
+            spinnerInterval = null
+          }
+          setSpinnerFrame(0)
+        }
 
         const handleRefreshClick = () => {
           if (!session_id) return
@@ -193,7 +335,7 @@ const tui: TuiPlugin = async (api, _options, _meta) => {
             sessionID: session_id,
             parts: [{
               type: "text",
-              text: "say 'refresh'"
+              text: "Output only and exactly the words 'Refreshed cache.'"
             }]
           }).then(() => {
             api.ui.toast({
@@ -212,6 +354,98 @@ const tui: TuiPlugin = async (api, _options, _meta) => {
           }).finally(() => {
             setRefreshInFlight(false)
           });
+        }
+
+        // Start a brand-new session seeded with a tiny "continuation" prompt
+        // built from the last exchange (and last 5 read files) of the current
+        // session. The point is to AVOID paying the cold-cache tax of
+        // revalidating the current session's full history — a fresh session
+        // with a small seed is cheaper than reviving a stale 100K-token
+        // context.
+        //
+        // Flow: build seed -> create session -> send prompt -> navigate.
+        // Each step is awaited so we can surface a precise toast on failure
+        // and never leave the user on a half-created orphan session.
+        const handleNewChatClick = async () => {
+          if (!session_id) return
+          if (newChatInFlight()) return
+          setNewChatInFlight(true)
+          startSpinner()
+
+          try {
+            const seed = buildSeedPrompt(api, session_id)
+            if (!seed) {
+              api.ui.toast({
+                variant: "info",
+                title: "Nothing to Continue",
+                message: "Need at least one user + assistant exchange to start a new chat.",
+                duration: 3000,
+              })
+              return
+            }
+
+            // Inherit the source session's active model so the new chat uses
+            // the same provider/model the user was already working with. The
+            // model lives on the user message (set by opencode at submit time)
+            // — we look it up from the most recent user message in history.
+            const messages = api.state.session.messages(session_id)
+            let inheritModel:
+              | { id: string; providerID: string; variant?: string }
+              | undefined
+            if (messages) {
+              for (let i = messages.length - 1; i >= 0; i--) {
+                const m = messages[i]
+                if (m.role === "user" && m.model?.modelID && m.model.providerID) {
+                  inheritModel = {
+                    id: m.model.modelID,
+                    providerID: m.model.providerID,
+                    variant: m.model.variant,
+                  }
+                  break
+                }
+              }
+            }
+
+            const createResult: any = await api.client.session.create({
+              ...(inheritModel ? { model: inheritModel } : {}),
+              title: "Continued chat",
+            })
+            const newSession: any = createResult?.data ?? createResult
+            const newSessionID: string | undefined = newSession?.id
+            if (!newSessionID) {
+              throw new Error("session.create returned no session id")
+            }
+
+            await api.client.session.prompt({
+              sessionID: newSessionID,
+              parts: [{ type: "text", text: seed }],
+            })
+
+            // Navigate to the new session so the user sees the assistant's
+            // "what would you like to work on next?" reply immediately.
+            try {
+              api.route.navigate("session", { sessionID: newSessionID })
+            } catch (navErr) {
+              debugLog(`route.navigate failed: ${String(navErr)}`)
+            }
+
+            api.ui.toast({
+              variant: "success",
+              title: "New Chat Started",
+              message: "Continuing in a fresh session with hot-cache-friendly context.",
+              duration: 3000,
+            })
+          } catch (err: any) {
+            api.ui.toast({
+              variant: "error",
+              title: "New Chat Failed",
+              message: String(err?.message || err),
+              duration: 5000,
+            })
+          } finally {
+            setNewChatInFlight(false)
+            stopSpinner()
+          }
         }
 
         // Local interval ticker that directly updates this component's reactive signals.
@@ -258,16 +492,22 @@ const tui: TuiPlugin = async (api, _options, _meta) => {
               }
             }
 
+            // Keep `hasMessages` in sync every tick. Used by the New chat
+            // button to decide whether there's anything worth continuing from.
+            setHasMessages(!!messages && messages.length > 0)
+
             // If the session is actively processing or streaming, freeze visual countdown and display "Busy"
             if (sessionStatus?.type === "busy") {
               setTimeText("Cache: HOT (Busy)")
               setColor("#EF4444") // Red (HOT)
+              setCacheState("busy")
               return
             }
 
             if (!messages || messages.length === 0) {
               setTimeText("Cache: COLD")
               setColor("#3B82F6") // Blue (COLD)
+              setCacheState("cold")
               return
             }
 
@@ -289,6 +529,7 @@ const tui: TuiPlugin = async (api, _options, _meta) => {
             if (!lastTime) {
               setTimeText(`Cache: HOT (${formatTimeText(totalDurationSec)})`)
               setColor("#EF4444") // Red (HOT)
+              setCacheState("hot")
               return
             }
 
@@ -298,17 +539,20 @@ const tui: TuiPlugin = async (api, _options, _meta) => {
             if (remainingMs <= 0) {
               setTimeText("Cache: COLD")
               setColor("#3B82F6") // Blue (COLD)
+              setCacheState("cold")
             } else {
               const minutes = Math.floor(remainingMs / 1000 / 60)
               const seconds = Math.floor((remainingMs / 1000) % 60)
               const formattedTime = `${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}`
               setTimeText(`Cache: HOT (${formattedTime})`)
-              
+
               // Dynamic color feedback: yellow when under 1 minute (almost cold)
               if (remainingMs < 60 * 1000) {
                 setColor("#FBBF24") // Yellow (WARNING - almost cold)
+                setCacheState("warning")
               } else {
                 setColor("#EF4444") // Red (HOT)
+                setCacheState("hot")
               }
 
               // Arm the trigger when the timer is healthy (above trigger zone)
@@ -370,22 +614,61 @@ const tui: TuiPlugin = async (api, _options, _meta) => {
 
         onCleanup(() => {
           clearInterval(interval)
+          stopSpinner()
         })
 
+        // Visibility rules (derived from cacheState + hasMessages):
+        //
+        //   Refresh button:
+        //     - HIDDEN on COLD: clicking it would just pay full cold-cache
+        //       tax for nothing (the original v1.1.0 "trap").
+        //     - Shown on HOT, WARNING, and BUSY: queueing a refresh during a
+        //       busy turn is fine — it just lands after the current turn
+        //       resolves, and hiding the button mid-stream would only add UI
+        //       noise. The in-flight debounce still prevents double-clicks.
+        //
+        //   New chat button:
+        //     - HIDDEN when there are no messages: nothing to seed from.
+        //     - Shown on COLD, WARNING, HOT, BUSY: starting fresh is always a
+        //       valid escape hatch (and the *primary* action on COLD). On BUSY
+        //       the seed will capture whatever the assistant has streamed so
+        //       far; hiding the button mid-stream just adds UI noise.
+        const showRefresh = () => cacheState() !== "cold"
+        const showNewChat = () => hasMessages()
+
         return (
-          <box paddingLeft={1} paddingRight={1}>
-            <box
-              onMouseUp={handleRefreshClick}
-              backgroundColor={refreshInFlight() ? "#374151" : "#4B5563"}
-              paddingLeft={1}
-              paddingRight={1}
-            >
-              <text fg={refreshInFlight() ? "#9CA3AF" : "#F3F4F6"}>
-                {refreshInFlight() ? "Sending..." : "↻ Refresh"}
-              </text>
-            </box>
-            <text fg={color()}><b> {timeText()}</b></text>
-           </box>
+          // flexDirection="row" lays the buttons and timer text on a single
+          // line. Without it OpenTUI defaults to column (vertical) stacking,
+          // which is what produced the "extra line" in v1.1.0.
+          <box flexDirection="row" paddingLeft={1} paddingRight={1} gap={1}>
+            {showNewChat() && (
+              <box
+                onMouseUp={handleNewChatClick}
+                backgroundColor={newChatInFlight() ? "#1E3A5F" : "#2563EB"}
+                paddingLeft={1}
+                paddingRight={1}
+              >
+                <text fg={newChatInFlight() ? "#93C5FD" : "#F3F4F6"}>
+                  {newChatInFlight()
+                    ? `Starting... ${SPINNER_FRAMES[spinnerFrame()]}`
+                    : "✨ New chat"}
+                </text>
+              </box>
+            )}
+            {showRefresh() && (
+              <box
+                onMouseUp={handleRefreshClick}
+                backgroundColor={refreshInFlight() ? "#374151" : "#4B5563"}
+                paddingLeft={1}
+                paddingRight={1}
+              >
+                <text fg={refreshInFlight() ? "#9CA3AF" : "#F3F4F6"}>
+                  {refreshInFlight() ? "Sending..." : "↻ Refresh"}
+                </text>
+              </box>
+            )}
+            <text fg={color()}><b>{timeText()}</b></text>
+          </box>
         )
       }
     }
