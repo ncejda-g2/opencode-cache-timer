@@ -6,6 +6,12 @@ import { appendFileSync, readFileSync, existsSync } from "node:fs"
 import { homedir } from "node:os"
 import { join } from "node:path"
 
+// Single source of truth for the displayed version. Keep this in sync with
+// package.json on release; surfacing it in the load toast is a cheap way to
+// verify which build is actually running (especially useful when iterating
+// against the cached npm install under ~/.cache/opencode/packages).
+const CACHE_TIMER_VERSION = "1.1.0"
+
 // DEBUG: file-based logger. Useful when toast stacking obscures init details
 // and as a permanent troubleshooting aid for the cache-timer config loader.
 // Safe to leave in; never throws (writes silently to /tmp).
@@ -137,12 +143,23 @@ const tui: TuiPlugin = async (api, _options, _meta) => {
 
   debugLog(`post-merge cacheDurations=${JSON.stringify(cacheDurations)} enableAutoPrompt=${enableAutoPrompt} defaultDuration=${defaultDuration}`);
 
-  api.ui.toast({
-    variant: "success",
-    title: "Cache Timer loaded",
-    duration: 3000,
-  });
+  // Defensive wrap: OpenCode's TUI API has been adding required fields between
+  // minor versions (e.g. `message` became mandatory on toasts in v1.15.x).
+  // If validation throws here, swallow it so the slot registration below still
+  // runs — losing a load toast is better than losing the entire countdown.
+  try {
+    api.ui.toast({
+      variant: "success",
+      title: `Cache Timer v${CACHE_TIMER_VERSION} loaded`,
+      message: `Auto-prompt: ${enableAutoPrompt ? "on" : "off"}`,
+      duration: 3000,
+    });
+  } catch (e: any) {
+    debugLog(`api.ui.toast THREW: ${e?.message || e}`);
+  }
 
+  // Defensive wrap on slot registration for the same reason as above.
+  try {
   api.slots.register({
     slots: {
       session_prompt_right(ctx, value) {
@@ -158,6 +175,44 @@ const tui: TuiPlugin = async (api, _options, _meta) => {
 
         const [timeText, setTimeText] = createSignal(`Cache: HOT (${formatTimeText(initialDuration)})`)
         const [color, setColor] = createSignal("#EF4444") // Red (HOT)
+
+        // Refresh button state.
+        // - hovered: drives border color change as hover affordance
+        // - inFlight: guards against rapid double-clicks spamming the session
+        //   (the prompt API is async; clicking again before it resolves would
+        //   queue a second user message and undo our cache-preservation goal)
+        const [refreshHovered, setRefreshHovered] = createSignal(false)
+        const [refreshInFlight, setRefreshInFlight] = createSignal(false)
+
+        const handleRefreshClick = () => {
+          if (!session_id) return
+          if (refreshInFlight()) return // debounce: ignore if already sending
+          setRefreshInFlight(true)
+
+          api.client.session.prompt({
+            sessionID: session_id,
+            parts: [{
+              type: "text",
+              text: "say 'refresh'"
+            }]
+          }).then(() => {
+            api.ui.toast({
+              variant: "success",
+              title: "Refresh Sent",
+              message: "Cache refresh prompt dispatched.",
+              duration: 3000,
+            });
+          }).catch((err) => {
+            api.ui.toast({
+              variant: "error",
+              title: "Refresh Failed",
+              message: String(err?.message || err),
+              duration: 5000,
+            });
+          }).finally(() => {
+            setRefreshInFlight(false)
+          });
+        }
 
         // Local interval ticker that directly updates this component's reactive signals.
         // This guarantees the UI text updates flawlessly and never freezes.
@@ -319,12 +374,25 @@ const tui: TuiPlugin = async (api, _options, _meta) => {
 
         return (
           <box paddingLeft={1} paddingRight={1}>
-            <text fg={color()}><b>{timeText()}</b></text>
-          </box>
+            <box
+              onMouseUp={handleRefreshClick}
+              backgroundColor={refreshInFlight() ? "#374151" : "#4B5563"}
+              paddingLeft={1}
+              paddingRight={1}
+            >
+              <text fg={refreshInFlight() ? "#9CA3AF" : "#F3F4F6"}>
+                {refreshInFlight() ? "Sending..." : "↻ Refresh"}
+              </text>
+            </box>
+            <text fg={color()}><b> {timeText()}</b></text>
+           </box>
         )
       }
     }
   })
+  } catch (e: any) {
+    debugLog(`api.slots.register THREW: ${e?.message || e}`);
+  }
 }
 
 const plugin: TuiPluginModule & { id: string } = {

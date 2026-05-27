@@ -1,13 +1,13 @@
 <div align="center">
-  <h1 align="center">opencode-cache-timer ⚡🕒</h1>
+  <h1 align="center">cache-timer ⚡🕒</h1>
 
   <p align="center">
     <strong>Live prompt-cache countdown and pre-emptive cache-saving for <a href="https://opencode.ai">OpenCode</a></strong>
   </p>
 
   <p align="center">
-    <a href="https://www.npmjs.com/package/opencode-cache-timer">
-      <img src="https://img.shields.io/npm/v/opencode-cache-timer?color=9b59b6" alt="npm" />
+    <a href="https://www.npmjs.com/package/cache-timer">
+      <img src="https://img.shields.io/npm/v/cache-timer?color=9b59b6" alt="npm" />
     </a>
     <a href="./CHANGELOG.md">
       <img src="https://img.shields.io/badge/changelog-Latest%20Changes-blue" alt="Changelog" />
@@ -77,7 +77,7 @@ Add the package to the `plugin` array in your `opencode.json`:
 ```json
 {
   "$schema": "https://opencode.ai/config.json",
-  "plugin": ["opencode-cache-timer"]
+  "plugin": ["cache-timer"]
 }
 ```
 

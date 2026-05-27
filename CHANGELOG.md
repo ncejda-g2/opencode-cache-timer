@@ -1,10 +1,23 @@
 # Changelog
 
-All notable changes to `opencode-cache-timer` are documented here. The format is
+All notable changes to `cache-timer` are documented here. The format is
 loosely based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
+
+## [1.1.0] - 2026-05-26
+
+### Added
+- **Clickable "Refresh Cache" button** rendered above the timer in
+  `session_prompt_right`. Sends a tiny `say 'refresh'` prompt to the current
+  session on mouse-down, giving users a manual one-click way to keep the
+  prompt cache hot without typing anything. Hover changes the border and
+  text color to green; in-flight requests dim the button and swap the label
+  to `Sending...` until the prompt resolves. A `refreshInFlight` signal
+  debounces rapid clicks so a single click can't queue multiple prompts.
+  Mouse support depends on the host terminal: iTerm2, kitty, Alacritty,
+  WezTerm, and modern Terminal.app all forward `onMouseDown` correctly.
 
 ## [1.0.0] - 2026-05-26
 
