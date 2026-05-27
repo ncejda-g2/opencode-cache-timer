@@ -46,7 +46,7 @@ jobs:
 
           echo "manual_recovery=false" >> $GITHUB_OUTPUT
 
-          PREVIOUS_VERSION=$(git show HEAD~1:package.json 2>/dev/null | node -e "let s='';process.stdin.on('data',c=>s+=c).on('end',()=>{try{console.log(JSON.parse(s).version)}catch(e){console.log('')}}")
+          PREVIOUS_VERSION=$(git show HEAD~1:package.json 2>/dev/null | node -e "let s='';process.stdin.on('data',c=>s+=c).on('end',()=>{try{console.log(JSON.parse(s).version)}catch(e){console.log('')}})")
 
           echo "Current version: $CURRENT_VERSION"
           echo "Previous version: $PREVIOUS_VERSION"
