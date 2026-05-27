@@ -1,3 +1,8 @@
 node_modules/
 .DS_Store
 *.log
+
+# Build artifacts — rebuilt fresh by the publish workflow.
+# Do not commit; edit cache-timer.tsx and run `npm run build` to regenerate locally.
+tui.js
+*.tgz
