@@ -31,30 +31,36 @@
 
 A TUI plugin that shows a live countdown to your prompt-cache expiry in the OpenCode session bar.
 
-The countdown indicator on the right side of your prompt:
+The countdown indicator and two clickable buttons sit on the right side of your prompt:
 
-- 🔥 **Cache: HOT (05:00)** — healthy, time remaining
-- ⚠️ **Cache: HOT (00:59)** — under one minute, about to expire
-- ❄️ **Cache: COLD** — expired or model changed
+- 🔥 **Cache: HOT (05:00)** — healthy, time remaining. Both **✨ New chat** and **↻ Refresh** buttons available.
+- ⚠️ **Cache: HOT (00:59)** — under one minute, about to expire. Both buttons still available.
+- ❄️ **Cache: COLD** — expired or model changed. **↻ Refresh** is hidden (clicking it would pay the full cold-cache tax); **✨ New chat** stays.
+- ⏳ **Starting...** — animated spinner shown while a new chat is being seeded and the TUI navigates to it.
 
 <p align="center">
-  <img src="docs/assets/hot_cache.png" alt="Hot cache, time remaining" width="420" />
+  <img src="docs/assets/buttons_hot.png" alt="HOT cache with New chat and Refresh buttons" width="640" />
 </p>
 <p align="center">
-  <img src="docs/assets/less_than_one_min.png" alt="Less than one minute remaining" width="420" />
+  <img src="docs/assets/buttons_warning.png" alt="Cache under one minute, both buttons still visible" width="640" />
 </p>
 <p align="center">
-  <img src="docs/assets/cold.png" alt="Cache cold" width="420" />
+  <img src="docs/assets/buttons_cold.png" alt="COLD cache, only New chat button visible" width="640" />
+</p>
+<p align="center">
+  <img src="docs/assets/buttons_starting.png" alt="Starting... spinner while seeding a new chat" width="640" />
 </p>
 
 When your session is COLD, you have three choices:
 
 1. **Pay the cold-start tax** to continue your session, or
-2. **Start a new session** and rebuild context.
+2. **Start a new session** and rebuild context — one click on **✨ New chat**.
 3. **Drop the session entirely**. Move on. Might not be worth continuing this session at all.
 
 * On **cost**, starting fresh almost always wins — especially over 100k input tokens (see chart).
 * On **latency**, resuming wins — one up-front cold-write hit beats several `Read` round-trips in a fresh session. Worth paying if you're coming back to do one quick thing and don't need to maximize savings.
+
+**✨ New chat** automates choice #2: it spins up a brand-new session seeded with a tiny continuation prompt (last user message, last assistant reply, and up to 5 most-recently `read` file paths) and auto-navigates the TUI to it. Inherits the source session's model. **↻ Refresh** sends a no-op prompt to the current session to keep the cache hot; it's hidden once the cache goes COLD because clicking it then would pay the full cold-write tax — the exact action this plugin exists to prevent.
 
 The plugin also **optionally** helps make it easier to start a fresh session (off by default — see [Configuration](#configuration) to enable). If enabled, it fires a tiny "summarize progress" prompt 15 seconds before the cache goes cold, capturing a hot-read summary you can paste into a fresh session to skip the cold-start write tax of resuming the bloated original.
 
