@@ -121,6 +121,34 @@ npm install
 npm run build   # compiles cache-timer.tsx -> tui.js
 ```
 
+## 🧪 Local Testing (working on the plugin itself)
+
+The TUI half of this plugin is a SolidJS component compiled by Babel (`babel-preset-solid` with `generate: "universal"`), so OpenCode can't load `cache-timer.tsx` directly — it loads the compiled `tui.js`. To iterate on a local checkout instead of the published npm version:
+
+**1. Point `opencode.json` at your local checkout.** Replace the `"cache-timer"` entry with a `file://` URL to the repo root:
+
+```json
+{
+  "plugin": [
+    "file:///absolute/path/to/opencode-cache-timer"
+  ]
+}
+```
+
+OpenCode resolves the directory through `package.json` (`main: "./index.js"` and the `./tui` export → `tui.js`), so it picks up your freshly compiled output instead of the npm tarball under `~/.cache/opencode/packages`.
+
+**2. Rebuild after every `.tsx` change:**
+
+```bash
+npm run build
+```
+
+**3. Fully restart OpenCode.** Plugin code is loaded once at startup; reopening the TUI is the only way to pick up changes.
+
+**4. Verify the right build is running.** Look for the green `Cache Timer v<x.y.z> loaded` toast at startup — the version in the toast comes from `CACHE_TIMER_VERSION` at the top of `cache-timer.tsx` and is the cheapest way to confirm you're not accidentally running the cached npm install.
+
+**Tip for fast iteration:** drop `defaultDuration` to something like `10` (seconds) in `~/.config/opencode/cache-timer.json` so the cache flips to COLD quickly and you can exercise the COLD-only `✨ New chat` button without waiting 5 minutes.
+
 ---
 
 <div align="center">

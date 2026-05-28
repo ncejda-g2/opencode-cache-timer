@@ -6,6 +6,22 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ## [Unreleased]
 
+## [1.1.1] - 2026-05-28
+
+### Fixed
+- **"New chat" spinner spinning forever when the new session's first reply
+  uses an interactive tool.** `handleNewChatClick` previously `await`ed
+  `session.prompt` before navigating, but `session.prompt` only resolves when
+  the assistant's turn completes. If the LLM invoked the Question tool (or
+  any other tool that pauses mid-turn for user input) the promise hung
+  indefinitely, so `route.navigate` never fired and `newChatInFlight` /
+  `stopSpinner` never cleared — leaving the user stranded on the source
+  session with a perpetually animating "Starting..." button. Fix: navigate
+  to the new session **first**, then dispatch the seed prompt as
+  fire-and-forget with an error toast on rejection. The in-flight window now
+  only spans the (sub-second) `session.create` call, making the UX
+  predictable regardless of what the assistant does in the new session.
+
 ## [1.1.0] - 2026-05-26
 
 ### Added

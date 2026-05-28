@@ -10,7 +10,7 @@ import { join } from "node:path"
 // package.json on release; surfacing it in the load toast is a cheap way to
 // verify which build is actually running (especially useful when iterating
 // against the cached npm install under ~/.cache/opencode/packages).
-const CACHE_TIMER_VERSION = "1.1.0"
+const CACHE_TIMER_VERSION = "1.1.1"
 
 // DEBUG: file-based logger. Useful when toast stacking obscures init details
 // and as a permanent troubleshooting aid for the cache-timer config loader.
@@ -416,18 +416,37 @@ const tui: TuiPlugin = async (api, _options, _meta) => {
               throw new Error("session.create returned no session id")
             }
 
-            await api.client.session.prompt({
-              sessionID: newSessionID,
-              parts: [{ type: "text", text: seed }],
-            })
-
-            // Navigate to the new session so the user sees the assistant's
-            // "what would you like to work on next?" reply immediately.
+            // Navigate FIRST, then fire the seed prompt as fire-and-forget.
+            //
+            // Why: `session.prompt` only resolves when the assistant's turn
+            // completes. If the LLM uses an interactive tool (e.g. Question)
+            // mid-turn, the promise hangs until the user answers — which they
+            // can't, because we haven't navigated yet. Awaiting it here would
+            // strand the user on the old session with a spinner that never
+            // stops. See v1.1.0 bug: "New chat spinner spins forever when the
+            // new session's first reply uses the Question tool."
+            //
+            // Decoupling navigate from prompt-completion makes the UX
+            // predictable regardless of what the assistant does in the new
+            // session. Errors from the detached prompt surface as a toast.
             try {
               api.route.navigate("session", { sessionID: newSessionID })
             } catch (navErr) {
               debugLog(`route.navigate failed: ${String(navErr)}`)
             }
+
+            api.client.session.prompt({
+              sessionID: newSessionID,
+              parts: [{ type: "text", text: seed }],
+            }).catch((promptErr: any) => {
+              debugLog(`new-chat seed prompt failed: ${String(promptErr?.message || promptErr)}`)
+              api.ui.toast({
+                variant: "error",
+                title: "Seed Prompt Failed",
+                message: String(promptErr?.message || promptErr),
+                duration: 5000,
+              })
+            })
 
             api.ui.toast({
               variant: "success",
@@ -443,6 +462,9 @@ const tui: TuiPlugin = async (api, _options, _meta) => {
               duration: 5000,
             })
           } finally {
+            // Clear in-flight as soon as create+navigate finish — we are NOT
+            // waiting for the assistant's turn. The spinner now only spans
+            // the create call (sub-second), not the full LLM turn.
             setNewChatInFlight(false)
             stopSpinner()
           }
