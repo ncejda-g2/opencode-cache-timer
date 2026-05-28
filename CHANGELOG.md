@@ -6,6 +6,50 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ## [Unreleased]
 
+## [1.2.0] - 2026-05-28
+
+### Added
+- **Live cache countdown during busy turns.** Previously the countdown froze to
+  a static `Cache: HOT (Busy)` whenever opencode was processing a turn. The
+  prompt-cache TTL clock keeps ticking during a long-running local tool call
+  (e.g. a `bash sleep`/`watch`), so freezing hid a real countdown — and the
+  cache could silently expire mid-turn with the UI still claiming HOT. The
+  timer now stays live while busy: `Cache: HOT (MM:SS) Busy`, going yellow
+  under one minute, exactly like the idle countdown.
+- **`busy-cold` state + Interrupt & fork.** When the cache expires while a turn
+  is still running, the timer now tells the truth (`Cache: COLD (BUSY)`) and
+  surfaces a single blue **`✨ Interrupt & fork`** button. Clicking it aborts
+  the running turn (`session.abort`) and forks a fresh chat seeded from the
+  interrupted output — instead of resuming against a cold cache and paying the
+  full cold-start tax. Doing nothing is still a valid choice; the button is an
+  option, not a forced action.
+- The pending-question cold toast now also fires in the `busy-cold` state and
+  points the returning user at `✨ Interrupt & fork`.
+
+### Changed
+- **Cache state is the source of truth.** opencode's local "busy" execution
+  status no longer masks the cache reality. If the provider cache is cold, the
+  user sees COLD regardless of whether a turn is running.
+- **Busy anchor selection.** While busy, the remaining time is computed from
+  `max(step-finish arrival, newest ASSISTANT message timestamp)`. Using the
+  freshest of the two is robust to both stale directions: a new turn's
+  assistant timestamp wins over a stale step-finish at turn start, and a
+  mid-turn step-finish wins over an older assistant timestamp during a long
+  turn.
+
+### Fixed
+- **Queued user messages no longer reset the timer.** A user message typed and
+  submitted while the session is still busy is created locally but never sent
+  to the provider, so it does not refresh the cache. The busy anchor now
+  considers **assistant** messages only, so a queued user message no longer
+  falsely jumps the countdown back to full.
+
+### Notes
+- Phase-2 step-finish instrumentation (the `/tmp/cache-timer-debug.log` tick
+  log and dual remaining-time anchors) is intentionally retained for this
+  release; the anchors provably diverge in multi-turn use, so the debug trail
+  is still earning its keep. It will be removed in a follow-up.
+
 ## [1.1.2] - 2026-05-28
 
 ### Added

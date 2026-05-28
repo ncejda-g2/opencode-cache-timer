@@ -10,7 +10,7 @@ import { join } from "node:path"
 // package.json on release; surfacing it in the load toast is a cheap way to
 // verify which build is actually running (especially useful when iterating
 // against the cached npm install under ~/.cache/opencode/packages).
-const CACHE_TIMER_VERSION = "1.1.2-sleep-test.2"
+const CACHE_TIMER_VERSION = "1.2.0"
 
 // DEBUG: file-based logger. Useful when toast stacking obscures init details
 // and as a permanent troubleshooting aid for the cache-timer config loader.
@@ -826,7 +826,7 @@ const tui: TuiPlugin = async (api, _options, _meta) => {
                   api.ui.toast({
                     variant: "info",
                     title: "Cache cold",
-                    message: "Cache expired while a question is pending and the turn is still running. Use ⛔ Interrupt & fork to continue in a fresh chat instead of resuming against a cold cache.",
+                    message: "Cache expired while a question is pending and the turn is still running. Use ✨ Interrupt & fork to continue in a fresh chat instead of resuming against a cold cache.",
                     duration: 300_000, // 5 min — long enough to catch a returning user
                   });
                 }
