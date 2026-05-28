@@ -6,6 +6,26 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ## [Unreleased]
 
+## [1.1.2] - 2026-05-28
+
+### Added
+- **Question-pending toast notifications.** When opencode's Question tool
+  opens a modal, the session pauses waiting on the user — if the user tabs
+  away or walks off and comes back N minutes later, they answer the question
+  and immediately pay the cold-cache tax without ever seeing the COLD UI
+  indicator behind the modal. The plugin now fires up to two toasts while a
+  question is pending:
+  - A **yellow "Cache nearly cold" warning** (1-min duration) when the cache
+    enters the WARNING state (<1 min remaining).
+  - A **blue "Cache cold" info toast** (5-min duration) when the cache enters
+    the COLD state.
+
+  Each toast fires at most once per pending-question episode; both dedupes
+  re-arm automatically when the question resolves so subsequent queued
+  questions get fresh notifications. Toasts only fire while a question is
+  pending — during normal interactive use the existing `session_prompt_right`
+  countdown is the single source of truth (no redundant noise).
+
 ## [1.1.1] - 2026-05-28
 
 ### Fixed

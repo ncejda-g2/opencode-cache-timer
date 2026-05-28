@@ -10,7 +10,7 @@ import { join } from "node:path"
 // package.json on release; surfacing it in the load toast is a cheap way to
 // verify which build is actually running (especially useful when iterating
 // against the cached npm install under ~/.cache/opencode/packages).
-const CACHE_TIMER_VERSION = "1.1.1"
+const CACHE_TIMER_VERSION = "1.1.2-sleep-test.2"
 
 // DEBUG: file-based logger. Useful when toast stacking obscures init details
 // and as a permanent troubleshooting aid for the cache-timer config loader.
@@ -219,13 +219,52 @@ function formatTimeText(totalSeconds: number): string {
 // enum instead of string-matching on the display label. Keeping it explicit
 // also makes it cheap to add new states (e.g. "expired-grace") later without
 // hunting through conditional UI code.
-type CacheState = "hot" | "warning" | "cold" | "busy";
+// "busy"      — turn running, cache still hot/warning (live countdown shown).
+// "busy-cold" — turn running BUT the provider cache has already expired. The
+//               cache truth (COLD) wins over the local busy status; the only
+//               available action is Interrupt-then-fork.
+type CacheState = "hot" | "warning" | "cold" | "busy" | "busy-cold";
 
 // Module-level session-keyed states to ensure absolute isolation across multiple sessions
 const triggeredSessions = new Set<string>();
 const healthySessions = new Set<string>();
 const lastUserMsgIds = new Map<string, string>();
 const autoPromptIds = new Set<string>(); // Immutable ledger of all generated auto-prompt message IDs
+
+// Question-pending toast dedupe. Both Sets hold session IDs that have ALREADY
+// had the corresponding toast fired during the *current* pending-question
+// episode. We add on fire, and clear both when the question list goes empty
+// (the user answered/cancelled). This re-arm-on-resolve pattern means:
+//
+//   - A single question that lingers across warning -> cold gets exactly one
+//     warning toast AND exactly one cold toast (not one of each per tick).
+//   - If a user lets multiple questions queue up across a long break, each
+//     new pending-question episode gets its own fresh pair of toasts —
+//     because the previous episode's resolve cleared the dedupe entries.
+//
+// Why two Sets, not one: warning and cold are distinct semantic events. A
+// session can enter warning, fire its warning toast, then enter cold and
+// still need to fire its cold toast — the user has not "seen the warning"
+// in any way that obviates the cold notification.
+const warningToastFiredSessions = new Set<string>();
+const coldToastFiredSessions = new Set<string>();
+
+// Provider-response anchor (PHASE 2 — currently instrumentation only).
+//
+// The prompt-cache TTL clock starts when the provider FINISHES responding to a
+// request, not when the assistant "turn" completes. For a turn that emits a
+// long-running local tool call (bash sleep/watch) or an interactive Question,
+// `message.time.completed` lands only after the local blocking finishes — long
+// after the provider went silent and its cache clock started ticking. So
+// `time.completed` over-estimates remaining cache life in exactly the cases we
+// care about.
+//
+// The accurate anchor is the arrival time of the most recent `step-finish`
+// part (one provider request/response cycle ends). step-finish parts carry no
+// timestamp field, so we stamp Date.now() when the event arrives. We record it
+// per session here. The ticker will (in the next phase) prefer this over
+// time.completed when computing remaining cache life.
+const lastStepFinishAt = new Map<string, number>();
 
 // When we fire an auto-summary, we record the user-message count of the session
 // AT trigger time. The next user message that appears beyond this count is
@@ -267,9 +306,69 @@ const tui: TuiPlugin = async (api, _options, _meta) => {
       title: `Cache Timer v${CACHE_TIMER_VERSION} loaded`,
       message: `Auto-prompt: ${enableAutoPrompt ? "on" : "off"}`,
       duration: 3000,
-    });
+    })
   } catch (e: any) {
     debugLog(`api.ui.toast THREW: ${e?.message || e}`);
+  }
+
+  // PHASE 2 INSTRUMENTATION: record provider-response anchor + log the gap
+  // between the step-finish arrival time and the assistant message's
+  // time.completed. If the theory holds, a turn containing a long local tool
+  // call (sleep/watch) or a pending Question will show a LARGE positive gap
+  // (time.completed >> step-finish arrival), proving time.completed is the
+  // wrong anchor. A normal quick turn should show a near-zero gap.
+  try {
+    // step-finish marks the end of one provider request/response cycle.
+    // Delivered as a message.part.updated event whose part.type is "step-finish".
+    api.event.on("message.part.updated", (event: any) => {
+      try {
+        const part = event?.properties?.part;
+        if (!part || part.type !== "step-finish") return;
+        const sessionID: string | undefined = part.sessionID;
+        if (!sessionID) return;
+
+        const arrivalMs = Date.now();
+        lastStepFinishAt.set(sessionID, arrivalMs);
+
+        // For validation, also look up the assistant message's time.completed
+        // (if already set) to measure the gap. messageID lets us find it.
+        let completedGapMs: number | string = "n/a (not completed yet)";
+        const messageID: string | undefined = part.messageID;
+        if (messageID) {
+          const messages = api.state.session.messages(sessionID);
+          const msg = messages?.find((m: any) => m.id === messageID);
+          const completed = (msg as any)?.time?.completed;
+          if (typeof completed === "number") {
+            completedGapMs = completed - arrivalMs;
+          }
+        }
+
+        debugLog(
+          `step-finish session=${sessionID} msg=${messageID} ` +
+          `arrivalMs=${arrivalMs} time.completed-minus-arrival=${completedGapMs}`
+        );
+      } catch (innerErr) {
+        debugLog(`step-finish handler THREW: ${String(innerErr)}`);
+      }
+    });
+
+    // Also log session.idle (turn end) so we can correlate when time.completed
+    // actually lands relative to the step-finish we recorded earlier.
+    api.event.on("session.idle", (event: any) => {
+      try {
+        const sessionID: string | undefined = event?.properties?.sessionID;
+        if (!sessionID) return;
+        const anchor = lastStepFinishAt.get(sessionID);
+        const sinceStepFinish = anchor ? Date.now() - anchor : "n/a";
+        debugLog(`session.idle session=${sessionID} ms-since-last-step-finish=${sinceStepFinish}`);
+      } catch (innerErr) {
+        debugLog(`session.idle handler THREW: ${String(innerErr)}`);
+      }
+    });
+
+    debugLog("registered phase-2 event listeners (message.part.updated/step-finish, session.idle)");
+  } catch (e: any) {
+    debugLog(`api.event.on THREW: ${e?.message || e}`);
   }
 
   // Defensive wrap on slot registration for the same reason as above.
@@ -302,6 +401,7 @@ const tui: TuiPlugin = async (api, _options, _meta) => {
         // first resolves would race and undo our cache-preservation goal).
         const [refreshInFlight, setRefreshInFlight] = createSignal(false)
         const [newChatInFlight, setNewChatInFlight] = createSignal(false)
+        const [interruptInFlight, setInterruptInFlight] = createSignal(false)
 
         // Animated spinner frame driver for the "Starting..." button label.
         // Cold-cache TTFT on Opus via LiteLLM can be 30-60s; without motion
@@ -470,14 +570,104 @@ const tui: TuiPlugin = async (api, _options, _meta) => {
           }
         }
 
+        // Interrupt-and-fork. Surfaced only in the "busy-cold" state: the turn
+        // is still running but the provider cache has already expired, so
+        // resuming would pay the cold-start tax against a stale, bloated
+        // context. Aborting first frees the session, then we fork a fresh chat
+        // seeded from the interrupted output (cheaper than reviving the cold
+        // session). Abort then reuse the exact New-chat flow.
+        const handleInterruptClick = async () => {
+          if (!session_id) return
+          if (interruptInFlight()) return
+          setInterruptInFlight(true)
+          try {
+            try {
+              await api.client.session.abort({ sessionID: session_id })
+            } catch (abortErr: any) {
+              debugLog(`session.abort failed: ${String(abortErr?.message || abortErr)}`)
+              api.ui.toast({
+                variant: "error",
+                title: "Interrupt Failed",
+                message: String(abortErr?.message || abortErr),
+                duration: 5000,
+              })
+              return
+            }
+            api.ui.toast({
+              variant: "info",
+              title: "Session Interrupted",
+              message: "Stopped the running turn before it pays the cold-cache tax. Forking a fresh chat from the interrupted output.",
+              duration: 4000,
+            })
+            // Fork from the interrupted output. Reuses the New-chat path, which
+            // builds a small seed, creates+navigates to a fresh session, and
+            // fires the seed prompt fire-and-forget.
+            await handleNewChatClick()
+          } finally {
+            setInterruptInFlight(false)
+          }
+        }
+
         // Local interval ticker that directly updates this component's reactive signals.
         // This guarantees the UI text updates flawlessly and never freezes.
-        const interval = setInterval(() => {
+        //
+        // Extracted into a named function (rather than an inline arrow) so we can
+        // invoke it ONCE synchronously at mount, before the 1s interval starts.
+        // Without that priming call, the signals would render their optimistic
+        // seed value ("HOT (max duration)") for up to a full second on mount —
+        // and again whenever the slot remounts (e.g. when a message is queued) —
+        // producing a one-frame flash to full before the first tick corrects it.
+        // Priming computes the true value immediately so the first painted frame
+        // is already correct.
+        const runTick = () => {
           if (!session_id) return
 
           try {
             const sessionStatus = api.state.session.status(session_id);
             const messages = api.state.session.messages(session_id);
+
+            // DEBUG: instrument status + pending-question count every tick so we
+            // can see what opencode actually reports while a Question modal is
+            // open (is it "busy"? is question() populated?). Remove once the
+            // question-pending toast behavior is verified.
+            try {
+              const dbgQuestions = api.state.session.question(session_id);
+
+              // Compare the two candidate anchors live, every tick:
+              //   (A) time.completed/time.created (current behavior)
+              //   (B) step-finish arrival time (proposed behavior)
+              // and the remaining cache seconds each implies. During a sleep/
+              // watch/question, (B) should drop toward COLD while (A) lags.
+              let dbgCompletedAnchor: number | undefined;
+              if (messages && messages.length > 0) {
+                for (let i = messages.length - 1; i >= 0; i--) {
+                  const t = messages[i].time?.completed ?? messages[i].time?.created;
+                  if (t) { dbgCompletedAnchor = t; break; }
+                }
+              }
+              const dbgStepFinishAnchor = lastStepFinishAt.get(session_id);
+              const dbgLastMsg = messages && messages.length > 0 ? messages[messages.length - 1] : undefined;
+              const dbgModelId = dbgLastMsg
+                ? (dbgLastMsg.role === "user" ? dbgLastMsg.model?.modelID : dbgLastMsg.modelID)
+                : undefined;
+              const dbgDurationSec = getCacheDuration(dbgModelId);
+              const now = Date.now();
+              const remA = dbgCompletedAnchor !== undefined
+                ? Math.round((dbgDurationSec * 1000 - (now - dbgCompletedAnchor)) / 1000)
+                : "n/a";
+              const remB = dbgStepFinishAnchor !== undefined
+                ? Math.round((dbgDurationSec * 1000 - (now - dbgStepFinishAnchor)) / 1000)
+                : "n/a";
+
+              debugLog(
+                `tick session=${session_id} status=${sessionStatus?.type ?? "undefined"} ` +
+                `questionCount=${dbgQuestions?.length ?? 0} cacheState=${cacheState()} ` +
+                `durationSec=${dbgDurationSec} ` +
+                `remainingA(time.completed)=${remA}s remainingB(step-finish)=${remB}s`
+              );
+            } catch (dbgErr) {
+              debugLog(`tick question() THREW: ${String(dbgErr)}`);
+            }
 
             // User-message ledgering MUST run every tick, including while the session
             // is busy. If we skip it during busy, the auto-prompt's user-message id
@@ -518,11 +708,136 @@ const tui: TuiPlugin = async (api, _options, _meta) => {
             // button to decide whether there's anything worth continuing from.
             setHasMessages(!!messages && messages.length > 0)
 
-            // If the session is actively processing or streaming, freeze visual countdown and display "Busy"
+            // If the session is actively processing or streaming, keep the
+            // countdown LIVE instead of freezing it.
+            //
+            // The prompt-cache TTL clock starts when the provider finishes
+            // responding (the step-finish), NOT when the assistant turn
+            // completes. During a long-running local tool call (e.g. a bash
+            // sleep/watch) the turn stays "busy" for the entire call while the
+            // provider has already gone silent and its cache clock is ticking.
+            // Freezing the display here hid a real countdown — and the cache
+            // could silently expire mid-turn with the UI still showing "HOT".
+            //
+            // CACHE STATE IS THE SOURCE OF TRUTH. "Busy" is opencode's local
+            // execution status and must never override the cache reality. If
+            // the provider cache is cold, the user sees COLD — full stop — so
+            // they can make an informed call (interrupt and fork from the
+            // interrupted output, or let the long task finish and knowingly pay
+            // the cold-start tax).
+            //
+            // Anchor selection while busy: use the FRESHEST of two signals,
+            // not step-finish alone.
+            //
+            //   (A) newest ASSISTANT message time.completed/time.created
+            //   (B) last step-finish arrival time
+            //
+            // Both mark "the provider touched the cache", but update at
+            // different moments and either can be the stale laggard:
+            //
+            //   - When a NEW turn begins, the assistant message is created the
+            //     moment the provider starts responding (≈ request received,
+            //     cache window reset), but step-finish (B) only fires when that
+            //     response FINISHES — often several seconds later. Trusting B
+            //     alone during that gap reads a STALE anchor from the previous
+            //     turn and falsely renders "busy-cold" even though the turn (and
+            //     thus the cache) is fresh. (Observed: A=69s while B=-26s for
+            //     ~6s at turn start.)
+            //
+            //   - Within a single long turn, B is the precise moment the provider
+            //     went quiet, which is what we proved correct in the 180s test.
+            //
+            // CRITICAL: anchor (A) is derived ONLY from ASSISTANT messages, never
+            // user messages. A queued user message (typed + submitted while the
+            // session is still busy) stamps a fresh `time.created` immediately,
+            // but it has NOT been sent to the provider — no round-trip, no cache
+            // refresh. Anchoring on it would falsely reset the timer to full.
+            // The provider only touches the cache when it actually engages the
+            // turn, which is exactly when the corresponding AssistantMessage is
+            // created. So a queued user message correctly does NOT bump (A).
+            //
+            // Taking max() of (A) and (B) is robust to both stale directions: a
+            // fresh turn's assistant timestamp wins over a stale step-finish, and
+            // a mid-turn step-finish wins over an older assistant timestamp.
             if (sessionStatus?.type === "busy") {
-              setTimeText("Cache: HOT (Busy)")
-              setColor("#EF4444") // Red (HOT)
-              setCacheState("busy")
+              let busyModelId: string | undefined;
+              if (messages && messages.length > 0) {
+                for (let i = messages.length - 1; i >= 0; i--) {
+                  const m = messages[i];
+                  if (m.role === "assistant") {
+                    busyModelId = m.modelID;
+                    break;
+                  }
+                }
+              }
+              const busyDurationSec = getCacheDuration(busyModelId);
+
+              const stepFinishAnchor = lastStepFinishAt.get(session_id);
+              // Assistant-only message anchor: ignore queued user messages.
+              let messageAnchor: number | undefined;
+              if (messages && messages.length > 0) {
+                for (let i = messages.length - 1; i >= 0; i--) {
+                  const m = messages[i];
+                  if (m.role !== "assistant") continue;
+                  const t = m.time?.completed ?? m.time?.created;
+                  if (t) {
+                    messageAnchor = t;
+                    break;
+                  }
+                }
+              }
+
+              // Freshest wins. undefined-safe: if only one exists, use it.
+              let busyAnchor: number | undefined;
+              if (stepFinishAnchor !== undefined && messageAnchor !== undefined) {
+                busyAnchor = Math.max(stepFinishAnchor, messageAnchor);
+              } else {
+                busyAnchor = stepFinishAnchor ?? messageAnchor;
+              }
+
+              if (busyAnchor === undefined) {
+                // No anchor yet (turn began before any provider response and
+                // before any message timestamp). Show full hot duration.
+                setTimeText(`Cache: HOT (${formatTimeText(busyDurationSec)}) Busy`)
+                setColor("#EF4444") // Red (HOT)
+                setCacheState("busy")
+                return
+              }
+
+              const busyRemainingMs = busyDurationSec * 1000 - (Date.now() - busyAnchor);
+              if (busyRemainingMs <= 0) {
+                // Cache expired mid-turn. Surface the truth AND the only action
+                // the user can take right now: interrupt, then fork. The session
+                // is still running, so a plain "New chat" fork isn't available
+                // until the turn is aborted — hence the dedicated "busy-cold"
+                // state and Interrupt button (see visibility rules).
+                setTimeText("Cache: COLD (BUSY)")
+                setColor("#3B82F6") // Blue (COLD)
+                setCacheState("busy-cold")
+
+                // If a Question is pending while the cache goes cold mid-turn,
+                // the user may be away behind the modal and unaware. Mirror the
+                // idle cold toast here (the busy branch returns early, so the
+                // toast block below never runs in this state). Same dedupe set
+                // keeps it to once per cold episode.
+                const bcQuestions = api.state.session.question(session_id);
+                if (bcQuestions && bcQuestions.length > 0 && !coldToastFiredSessions.has(session_id)) {
+                  coldToastFiredSessions.add(session_id);
+                  api.ui.toast({
+                    variant: "info",
+                    title: "Cache cold",
+                    message: "Cache expired while a question is pending and the turn is still running. Use ⛔ Interrupt & fork to continue in a fresh chat instead of resuming against a cold cache.",
+                    duration: 300_000, // 5 min — long enough to catch a returning user
+                  });
+                }
+              } else {
+                const busyMinutes = Math.floor(busyRemainingMs / 1000 / 60)
+                const busySeconds = Math.floor((busyRemainingMs / 1000) % 60)
+                const busyFormatted = `${String(busyMinutes).padStart(2, "0")}:${String(busySeconds).padStart(2, "0")}`
+                setTimeText(`Cache: HOT (${busyFormatted}) Busy`)
+                setColor(busyRemainingMs < 60 * 1000 ? "#FBBF24" : "#EF4444") // Yellow <1min, else Red
+                setCacheState("busy")
+              }
               return
             }
 
@@ -629,14 +944,78 @@ const tui: TuiPlugin = async (api, _options, _meta) => {
                 });
               }
             }
+
+            // ===== Question-pending toast notifications =====
+            //
+            // Motivation: when opencode's Question tool opens a modal, the
+            // session is paused waiting on the user. If the user tabs away or
+            // walks off and comes back N minutes later, they answer the
+            // question and immediately pay the cold-cache tax — without ever
+            // seeing the COLD UI indicator behind the modal.
+            //
+            // The countdown timer itself is visible in `session_prompt_right`
+            // regardless, so we deliberately do NOT toast when the cache goes
+            // cold during normal interactive use — that would be redundant
+            // noise. Toasts only fire when a question is *currently pending*.
+            //
+            // Each toast fires at most once per pending-question episode (per
+            // cache-state transition). When the question resolves (list goes
+            // empty), both dedupe entries clear, so the next pending question
+            // gets fresh toasts if/when it crosses warning or cold again.
+            const pendingQuestions = api.state.session.question(session_id);
+            const questionIsPending = pendingQuestions && pendingQuestions.length > 0;
+            const currentCacheState = cacheState();
+
+            if (questionIsPending) {
+              if (currentCacheState === "warning" && !warningToastFiredSessions.has(session_id)) {
+                warningToastFiredSessions.add(session_id);
+                api.ui.toast({
+                  variant: "warning",
+                  title: "Cache nearly cold",
+                  message: "Cache expires in <1 min. Answer or dismiss the question soon to avoid the cold-start tax.",
+                  duration: 60_000, // ~1 min — naturally clears around the cold transition
+                });
+              }
+              if (currentCacheState === "cold" && !coldToastFiredSessions.has(session_id)) {
+                coldToastFiredSessions.add(session_id);
+                api.ui.toast({
+                  variant: "info",
+                  title: "Cache cold",
+                  message: "Cache has expired while a question is pending. Consider starting a fresh chat (✨ New chat) instead of answering to avoid paying the cold-start tax.",
+                  duration: 300_000, // 5 min — long enough to catch a returning user
+                });
+              }
+            } else {
+              // Question resolved (or never existed). Re-arm both dedupes so
+              // the next pending-question episode gets a fresh pair of toasts.
+              // Cheap to call every tick; Set.delete is a no-op when absent.
+              warningToastFiredSessions.delete(session_id);
+              coldToastFiredSessions.delete(session_id);
+            }
           } catch (err) {
             console.error("[Cache-Timer Error]", err);
           }
-        }, 1000)
+        }
+
+        // Start the 1s cadence. NOTE: we intentionally do NOT prime the first
+        // frame with a synchronous runTick() here. Doing so ran the full tick
+        // body (messages scan + question fetch + debug logging) on the slot
+        // render/mount path, which froze sessions on remount. The harmless
+        // one-frame "HOT (max)" flash before the first interval tick is the
+        // accepted trade-off; reintroduce priming only via a deferred
+        // (queueMicrotask/setTimeout 0) call if the flash needs fixing.
+        const interval = setInterval(runTick, 1000)
 
         onCleanup(() => {
           clearInterval(interval)
           stopSpinner()
+          // Drop any pending toast dedupe entries for this session so a fresh
+          // mount (e.g. user navigates back) starts with a clean slate. The
+          // module-level Sets persist across mounts otherwise.
+          if (session_id) {
+            warningToastFiredSessions.delete(session_id)
+            coldToastFiredSessions.delete(session_id)
+          }
         })
 
         // Visibility rules (derived from cacheState + hasMessages).
@@ -650,8 +1029,8 @@ const tui: TuiPlugin = async (api, _options, _meta) => {
         // recommended action — and hides the other.
         //
         //   Refresh button:
-        //     - HIDDEN on COLD: clicking it would just pay full cold-cache
-        //       tax for nothing (the original v1.1.0 "trap").
+        //     - HIDDEN on COLD and BUSY-COLD: clicking it would just pay full
+        //       cold-cache tax for nothing (the original v1.1.0 "trap").
         //     - Shown on HOT, WARNING, and BUSY: queueing a refresh during a
         //       busy turn is fine — it just lands after the current turn
         //       resolves, and hiding the button mid-stream would only add UI
@@ -665,16 +1044,38 @@ const tui: TuiPlugin = async (api, _options, _meta) => {
         //       rate to keep going). WARNING is just HOT with less time left
         //       — the cost math is identical, only the color changes. Users
         //       who explicitly want a clean fork on hot can still type /new.
-        //     - Shown on COLD: this is the *primary* action when the cache
-        //       has expired — fork instead of paying the cold-write tax.
-        const showRefresh = () => cacheState() !== "cold"
+        //     - Shown on COLD (idle): this is the *primary* action when the
+        //       cache has expired — fork instead of paying the cold-write tax.
+        //
+        //   Interrupt button:
+        //     - Shown ONLY on BUSY-COLD: the turn is still running but the
+        //       cache has already expired. A plain fork isn't possible yet
+        //       (session is busy), so we offer Interrupt-then-fork. Doing
+        //       nothing means the long task will resume against a cold cache
+        //       and pay the full tax — which the user may still choose, so the
+        //       button is an option, not a forced action.
+        const showRefresh = () =>
+          cacheState() !== "cold" && cacheState() !== "busy-cold"
         const showNewChat = () => hasMessages() && cacheState() === "cold"
+        const showInterrupt = () => cacheState() === "busy-cold"
 
         return (
           // flexDirection="row" lays the buttons and timer text on a single
           // line. Without it OpenTUI defaults to column (vertical) stacking,
           // which is what produced the "extra line" in v1.1.0.
           <box flexDirection="row" paddingLeft={1} paddingRight={1} gap={1}>
+            {showInterrupt() && (
+              <box
+                onMouseUp={handleInterruptClick}
+                backgroundColor={interruptInFlight() ? "#1E3A5F" : "#2563EB"}
+                paddingLeft={1}
+                paddingRight={1}
+              >
+                <text fg={interruptInFlight() ? "#93C5FD" : "#F3F4F6"}>
+                  {interruptInFlight() ? "Interrupting..." : "✨ Interrupt & fork"}
+                </text>
+              </box>
+            )}
             {showNewChat() && (
               <box
                 onMouseUp={handleNewChatClick}
