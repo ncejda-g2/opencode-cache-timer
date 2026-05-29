@@ -6,26 +6,43 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ## [Unreleased]
 
-## [1.3.0] - 2026-05-29
+## [1.2.0] - 2026-05-29
 
 ### Added
+- **Live cache countdown during busy turns.** Previously the countdown froze to
+  a static `Cache: HOT (Busy)` whenever opencode was processing a turn. The
+  prompt-cache TTL clock keeps ticking during a long-running local tool call
+  (e.g. a `bash sleep`/`watch`), so freezing hid a real countdown — and the
+  cache could silently expire mid-turn with the UI still claiming HOT. The
+  timer now stays live while busy: `Cache: HOT (MM:SS)`, going yellow
+  under one minute, exactly like the idle countdown (no ` Busy` suffix, so the
+  text doesn't bounce between busy/idle states).
+- **`busy-cold` state + Stop & fork.** When the cache expires while a turn
+  is still running, the timer now tells the truth (`Cache: COLD (BUSY)`) and
+  surfaces a single blue **`✨ Stop & fork`** button (in-flight label
+  `Stopping...`). Clicking it aborts the running turn (`session.abort`) and
+  forks a fresh chat seeded from the interrupted output — instead of resuming
+  against a cold cache and paying the full cold-start tax. Doing nothing is
+  still a valid choice; the button is an option, not a forced action.
 - **Global cold-cache toast watcher for pending prompts.** A single module-level
-  watcher now fires the "cache nearly cold" / "cache cold" toasts whenever a
+  watcher fires the "cache nearly cold" / "cache cold" toasts whenever a
   question **or permission** prompt is pending — not just questions, and not
   tied to a UI slot's lifecycle. The cold toast lasts 24h so a user returning
   from a long break (lunch, overnight) still sees the warning behind the modal
-  before they answer and pay the cold-cache tax.
+  before they answer and pay the cold-cache tax. In `busy-cold` it points the
+  returning user at `✨ Stop & fork`.
 
 ### Changed
-- **Busy-hot label matches idle.** The busy-hot timer text dropped its trailing
-  ` Busy` suffix and now reads `Cache: HOT (MM:SS)` identically whether busy or
-  idle, removing the visual bounce between states. The `busy-cold` label
-  (`Cache: COLD (BUSY)`) is unchanged.
-- **`✨ Stop & fork` button** (renamed from `✨ Interrupt & fork`; in-flight
-  label `Stopping...`) for the `busy-cold` state, giving the adjacent
-  `COLD (BUSY)` label more room.
+- **Cache state is the source of truth.** opencode's local "busy" execution
+  status no longer masks the cache reality. If the provider cache is cold, the
+  user sees COLD regardless of whether a turn is running.
 
 ### Fixed
+- **Queued user messages no longer reset the timer.** A user message typed and
+  submitted while the session is still busy is created locally but never sent
+  to the provider, so it does not refresh the cache. The busy anchor considers
+  **assistant** messages only, so a queued user message no longer falsely jumps
+  the countdown back to full.
 - **Cache timer no longer falsely resets to FULL when an interactive prompt
   resolves.** Root cause (proven via instrumentation): a posing turn's
   assistant message has `time.created` stamped at provider-response start (when
@@ -52,56 +69,11 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 - **High-volume debug instrumentation.** The per-tick `/tmp/cache-timer-debug.log`
   block (API probes, PARTS probes, dual remaining-time anchors, per-second
   `tick` line) and the now-unused `step-finish` / `session.idle` handlers were
-  removed — they were earning their keep during the `time.created` investigation
-  above but would otherwise bloat the debug log without bound. This fulfils the
-  removal promised in the 1.2.0 Notes. Low-volume, event-driven logging (config
-  load, init, error handlers, prompt lifecycle, resolve-sweeper) is retained.
-  The debugging workflow and event-stream learnings are preserved in
-  `docs/DEBUGGING.md`.
-
-## [1.2.0] - 2026-05-28
-
-### Added
-- **Live cache countdown during busy turns.** Previously the countdown froze to
-  a static `Cache: HOT (Busy)` whenever opencode was processing a turn. The
-  prompt-cache TTL clock keeps ticking during a long-running local tool call
-  (e.g. a `bash sleep`/`watch`), so freezing hid a real countdown — and the
-  cache could silently expire mid-turn with the UI still claiming HOT. The
-  timer now stays live while busy: `Cache: HOT (MM:SS) Busy`, going yellow
-  under one minute, exactly like the idle countdown.
-- **`busy-cold` state + Interrupt & fork.** When the cache expires while a turn
-  is still running, the timer now tells the truth (`Cache: COLD (BUSY)`) and
-  surfaces a single blue **`✨ Interrupt & fork`** button. Clicking it aborts
-  the running turn (`session.abort`) and forks a fresh chat seeded from the
-  interrupted output — instead of resuming against a cold cache and paying the
-  full cold-start tax. Doing nothing is still a valid choice; the button is an
-  option, not a forced action.
-- The pending-question cold toast now also fires in the `busy-cold` state and
-  points the returning user at `✨ Interrupt & fork`.
-
-### Changed
-- **Cache state is the source of truth.** opencode's local "busy" execution
-  status no longer masks the cache reality. If the provider cache is cold, the
-  user sees COLD regardless of whether a turn is running.
-- **Busy anchor selection.** While busy, the remaining time is computed from
-  `max(step-finish arrival, newest ASSISTANT message timestamp)`. Using the
-  freshest of the two is robust to both stale directions: a new turn's
-  assistant timestamp wins over a stale step-finish at turn start, and a
-  mid-turn step-finish wins over an older assistant timestamp during a long
-  turn.
-
-### Fixed
-- **Queued user messages no longer reset the timer.** A user message typed and
-  submitted while the session is still busy is created locally but never sent
-  to the provider, so it does not refresh the cache. The busy anchor now
-  considers **assistant** messages only, so a queued user message no longer
-  falsely jumps the countdown back to full.
-
-### Notes
-- Phase-2 step-finish instrumentation (the `/tmp/cache-timer-debug.log` tick
-  log and dual remaining-time anchors) is intentionally retained for this
-  release; the anchors provably diverge in multi-turn use, so the debug trail
-  is still earning its keep. It will be removed in a follow-up.
+  removed — they earned their keep during the `time.created` investigation above
+  but would otherwise bloat the debug log without bound. Low-volume,
+  event-driven logging (config load, init, error handlers, prompt lifecycle,
+  resolve-sweeper) is retained. The debugging workflow and event-stream
+  learnings are preserved in `docs/DEBUGGING.md`.
 
 ## [1.1.2] - 2026-05-28
 
