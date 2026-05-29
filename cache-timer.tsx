@@ -10,7 +10,7 @@ import { join } from "node:path"
 // package.json on release; surfacing it in the load toast is a cheap way to
 // verify which build is actually running (especially useful when iterating
 // against the cached npm install under ~/.cache/opencode/packages).
-const CACHE_TIMER_VERSION = "1.2.0-question-test.3"
+const CACHE_TIMER_VERSION = "1.2.0-question-test.4"
 
 // DEBUG: file-based logger. Useful when toast stacking obscures init details
 // and as a permanent troubleshooting aid for the cache-timer config loader.
@@ -410,13 +410,32 @@ const tui: TuiPlugin = async (api, _options, _meta) => {
         // For validation, also look up the assistant message's time.completed
         // (if already set) to measure the gap. messageID lets us find it.
         let completedGapMs: number | string = "n/a (not completed yet)";
+        // DISCRIMINATOR INSTRUMENTATION: to separate a REAL provider-response
+        // step-finish from a LATE finalization step-finish (one delivered when a
+        // pending Question/permission resolves, carrying the posing turn's
+        // already-generated tokens but stamped at resolve-time). Candidate
+        // signals:
+        //   - part.reason : the finish reason for this step.
+        //   - msg.time.created : when the assistant message began. If the model
+        //     produced its output long before this step-finish ARRIVED, then
+        //     (arrival - created) is large -> the step-finish is a late
+        //     finalization and arrivalMs is the WRONG cache anchor. A real
+        //     provider response arrives within ~seconds of message creation.
+        const reason: string | undefined = (part as any).reason;
+        let createdToArrivalMs: number | string = "n/a";
+        let completedToArrivalMs: number | string = "n/a";
         const messageID: string | undefined = part.messageID;
         if (messageID) {
           const messages = api.state.session.messages(sessionID);
           const msg = messages?.find((m: any) => m.id === messageID);
           const completed = (msg as any)?.time?.completed;
+          const created = (msg as any)?.time?.created;
           if (typeof completed === "number") {
             completedGapMs = completed - arrivalMs;
+            completedToArrivalMs = arrivalMs - completed;
+          }
+          if (typeof created === "number") {
+            createdToArrivalMs = arrivalMs - created;
           }
         }
 
@@ -451,15 +470,21 @@ const tui: TuiPlugin = async (api, _options, _meta) => {
 
         if (!(globalThis as any).__ctStepFinishShapeProbed) {
           (globalThis as any).__ctStepFinishShapeProbed = true;
+          // Full raw dump (minus snapshot, which can be huge) so we can inspect
+          // `reason` and any other fields that distinguish real vs finalization.
+          const { snapshot, ...partNoSnapshot } = (part as any) ?? {};
           debugLog(
             `step-finish SHAPE probe: partKeys=${JSON.stringify(Object.keys(part ?? {}))} ` +
+            `partRaw(noSnapshot)=${JSON.stringify(partNoSnapshot)} ` +
             `tokensRaw=${JSON.stringify(tokens)} costRaw=${JSON.stringify(cost)}`
           );
         }
 
         debugLog(
           `step-finish session=${sessionID} msg=${messageID} ` +
+          `reason=${reason ?? "n/a"} ` +
           `arrivalMs=${arrivalMs} time.completed-minus-arrival=${completedGapMs} ` +
+          `createdToArrival=${createdToArrivalMs}ms completedToArrival=${completedToArrivalMs}ms ` +
           `input=${inputTok} output=${outputTok} cacheWrite=${cacheWrite} cacheRead=${cacheRead} ` +
           `cost=${cost ?? "n/a"}`
         );
