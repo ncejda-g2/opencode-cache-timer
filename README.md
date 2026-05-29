@@ -36,6 +36,7 @@ The countdown indicator and (depending on state) one clickable button sit on the
 - 🔥 **Cache: HOT (05:00)** — healthy, time remaining. **↻ Refresh** is the only button shown (the 90% hot-read discount makes continuing cheaper than forking, so **✨ New chat** stays hidden).
 - ⚠️ **Cache: HOT (00:59)** — under one minute, about to expire. Cost math is identical to HOT — only the color changes. **↻ Refresh** still shown.
 - ❄️ **Cache: COLD** — expired or model changed. **✨ New chat** is the only button shown (forking now is strictly cheaper than paying the cold-write tax to resume).
+- 🧊 **Cache: COLD (BUSY)** — the cache expired *while a turn is still running* (e.g. a long local tool call). The turn can't be forked until it's stopped, so **✨ Stop & fork** is shown: it aborts the running turn and forks a fresh session from the interrupted output, avoiding the cold-start tax on the bloated context.
 - ⏳ **Starting...** — animated spinner shown while a new chat is being seeded and the TUI navigates to it.
 
 <p align="center">
@@ -46,6 +47,9 @@ The countdown indicator and (depending on state) one clickable button sit on the
 </p>
 <p align="center">
   <img src="docs/assets/buttons_cold.png" alt="COLD cache, only New chat button visible" width="640" />
+</p>
+<p align="center">
+  <img src="docs/assets/buttons_busy_cold.png" alt="COLD cache mid-turn, Stop & fork button visible" width="640" />
 </p>
 <p align="center">
   <img src="docs/assets/buttons_starting.png" alt="Starting... spinner while seeding a new chat" width="640" />

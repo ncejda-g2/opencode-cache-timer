@@ -10,7 +10,7 @@ import { join } from "node:path"
 // package.json on release; surfacing it in the load toast is a cheap way to
 // verify which build is actually running (especially useful when iterating
 // against the cached npm install under ~/.cache/opencode/packages).
-const CACHE_TIMER_VERSION = "1.2.0-question-test.5"
+const CACHE_TIMER_VERSION = "1.2.0-question-test.7"
 
 // DEBUG: file-based logger. Useful when toast stacking obscures init details
 // and as a permanent troubleshooting aid for the cache-timer config loader.
@@ -1140,7 +1140,7 @@ const tui: TuiPlugin = async (api, _options, _meta) => {
               if (busyAnchor === undefined) {
                 // No anchor yet (turn began before any provider response and
                 // before any message timestamp). Show full hot duration.
-                setTimeText(`Cache: HOT (${formatTimeText(busyDurationSec)}) Busy`)
+                setTimeText(`Cache: HOT (${formatTimeText(busyDurationSec)})`)
                 setColor("#EF4444") // Red (HOT)
                 setCacheState("busy")
                 return
@@ -1160,7 +1160,7 @@ const tui: TuiPlugin = async (api, _options, _meta) => {
                 const busyMinutes = Math.floor(busyRemainingMs / 1000 / 60)
                 const busySeconds = Math.floor((busyRemainingMs / 1000) % 60)
                 const busyFormatted = `${String(busyMinutes).padStart(2, "0")}:${String(busySeconds).padStart(2, "0")}`
-                setTimeText(`Cache: HOT (${busyFormatted}) Busy`)
+                setTimeText(`Cache: HOT (${busyFormatted})`)
                 setColor(busyRemainingMs < 60 * 1000 ? "#FBBF24" : "#EF4444") // Yellow <1min, else Red
                 setCacheState("busy")
               }
@@ -1362,7 +1362,7 @@ const tui: TuiPlugin = async (api, _options, _meta) => {
                 paddingRight={1}
               >
                 <text fg={interruptInFlight() ? "#93C5FD" : "#F3F4F6"}>
-                  {interruptInFlight() ? "Interrupting..." : "✨ Interrupt & fork"}
+                  {interruptInFlight() ? "Stopping..." : "✨ Stop & fork"}
                 </text>
               </box>
             )}
