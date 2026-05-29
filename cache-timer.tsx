@@ -10,7 +10,7 @@ import { join } from "node:path"
 // package.json on release; surfacing it in the load toast is a cheap way to
 // verify which build is actually running (especially useful when iterating
 // against the cached npm install under ~/.cache/opencode/packages).
-const CACHE_TIMER_VERSION = "1.2.0-question-test.2"
+const CACHE_TIMER_VERSION = "1.2.0-question-test.3"
 
 // DEBUG: file-based logger. Useful when toast stacking obscures init details
 // and as a permanent troubleshooting aid for the cache-timer config loader.
@@ -420,9 +420,48 @@ const tui: TuiPlugin = async (api, _options, _meta) => {
           }
         }
 
+        // TOKEN/USAGE INSTRUMENTATION (transient — for the reject-vs-real-write
+        // investigation). A step-finish part carries the provider usage for the
+        // request/response cycle it terminates. The decisive signal is the
+        // CACHE-WRITE token count: a real provider round-trip that primes the
+        // prompt cache reports a non-zero cache *write* (a.k.a. cache_creation /
+        // cache.write). A bare turn-finalization fired on question.rejected
+        // SHOULD report zero new input/output and zero cache write — proving the
+        // step-finish is a no-op and the anchor must NOT be refreshed from it.
+        //
+        // Field names vary across opencode/provider-SDK versions, so we probe
+        // several shapes defensively and dump the raw `tokens` object on first
+        // sight to lock down the exact schema. Never throws.
+        const tokens: any = (part as any).tokens ?? (part as any).usage ?? undefined;
+        const cost: any = (part as any).cost;
+        const cacheWrite =
+          tokens?.cache?.write ??
+          tokens?.cache_creation ??
+          tokens?.cacheCreation ??
+          tokens?.cache_creation_input_tokens ??
+          "n/a";
+        const cacheRead =
+          tokens?.cache?.read ??
+          tokens?.cache_read ??
+          tokens?.cacheRead ??
+          tokens?.cache_read_input_tokens ??
+          "n/a";
+        const inputTok = tokens?.input ?? tokens?.input_tokens ?? tokens?.prompt ?? "n/a";
+        const outputTok = tokens?.output ?? tokens?.output_tokens ?? tokens?.completion ?? "n/a";
+
+        if (!(globalThis as any).__ctStepFinishShapeProbed) {
+          (globalThis as any).__ctStepFinishShapeProbed = true;
+          debugLog(
+            `step-finish SHAPE probe: partKeys=${JSON.stringify(Object.keys(part ?? {}))} ` +
+            `tokensRaw=${JSON.stringify(tokens)} costRaw=${JSON.stringify(cost)}`
+          );
+        }
+
         debugLog(
           `step-finish session=${sessionID} msg=${messageID} ` +
-          `arrivalMs=${arrivalMs} time.completed-minus-arrival=${completedGapMs}`
+          `arrivalMs=${arrivalMs} time.completed-minus-arrival=${completedGapMs} ` +
+          `input=${inputTok} output=${outputTok} cacheWrite=${cacheWrite} cacheRead=${cacheRead} ` +
+          `cost=${cost ?? "n/a"}`
         );
       } catch (innerErr) {
         debugLog(`step-finish handler THREW: ${String(innerErr)}`);
