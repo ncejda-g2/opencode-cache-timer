@@ -6,6 +6,59 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ## [Unreleased]
 
+## [1.3.0] - 2026-05-29
+
+### Added
+- **Global cold-cache toast watcher for pending prompts.** A single module-level
+  watcher now fires the "cache nearly cold" / "cache cold" toasts whenever a
+  question **or permission** prompt is pending — not just questions, and not
+  tied to a UI slot's lifecycle. The cold toast lasts 24h so a user returning
+  from a long break (lunch, overnight) still sees the warning behind the modal
+  before they answer and pay the cold-cache tax.
+
+### Changed
+- **Busy-hot label matches idle.** The busy-hot timer text dropped its trailing
+  ` Busy` suffix and now reads `Cache: HOT (MM:SS)` identically whether busy or
+  idle, removing the visual bounce between states. The `busy-cold` label
+  (`Cache: COLD (BUSY)`) is unchanged.
+- **`✨ Stop & fork` button** (renamed from `✨ Interrupt & fork`; in-flight
+  label `Stopping...`) for the `busy-cold` state, giving the adjacent
+  `COLD (BUSY)` label more room.
+
+### Fixed
+- **Cache timer no longer falsely resets to FULL when an interactive prompt
+  resolves.** Root cause (proven via instrumentation): a posing turn's
+  assistant message has `time.created` stamped at provider-response start (when
+  the prompt-cache window resets) but `time.completed` **and** the step-finish
+  arrival are restamped at turn *resolution*. For an interactive turn,
+  resolution is delayed by however long the user sat on the prompt, so both
+  signals jumped to ~now on resolve and reset the timer to FULL — masking a
+  genuinely cold cache. All three cache-math sites now anchor on the newest
+  **assistant** message's `time.created`, which is never restamped. The
+  now-unreliable step-finish arrival anchor was dropped.
+- **Lingering cold toast is now swept on prompt resolve.** Because the cold
+  toast is long-lived (24h) it won't self-clear, so on resolve the watcher
+  emits a single near-invisible sweeper toast (blank text, 1ms) — exploiting
+  opencode clearing all toasts when a new one is emitted. The sweeper is
+  deliberately blank rather than "cache refreshed", which would be false on
+  cancel or when the cache is still cold. Also fixed a race where the slot's
+  `onCleanup` deleted the session from the toast fired-sets on reply (the slot
+  remounts as the turn continues), beating the watcher's re-arm loop and
+  stealing the resolve signal so no sweeper fired on reply. The global watcher
+  is now the sole owner of the fired-sets and reliably sweeps on both reply and
+  reject.
+
+### Removed
+- **High-volume debug instrumentation.** The per-tick `/tmp/cache-timer-debug.log`
+  block (API probes, PARTS probes, dual remaining-time anchors, per-second
+  `tick` line) and the now-unused `step-finish` / `session.idle` handlers were
+  removed — they were earning their keep during the `time.created` investigation
+  above but would otherwise bloat the debug log without bound. This fulfils the
+  removal promised in the 1.2.0 Notes. Low-volume, event-driven logging (config
+  load, init, error handlers, prompt lifecycle, resolve-sweeper) is retained.
+  The debugging workflow and event-stream learnings are preserved in
+  `docs/DEBUGGING.md`.
+
 ## [1.2.0] - 2026-05-28
 
 ### Added
