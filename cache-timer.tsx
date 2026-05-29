@@ -10,7 +10,7 @@ import { join } from "node:path"
 // package.json on release; surfacing it in the load toast is a cheap way to
 // verify which build is actually running (especially useful when iterating
 // against the cached npm install under ~/.cache/opencode/packages).
-const CACHE_TIMER_VERSION = "1.2.0-question-test.11"
+const CACHE_TIMER_VERSION = "1.2.0-question-test.12"
 
 // DEBUG: file-based logger. Useful when toast stacking obscures init details
 // and as a permanent troubleshooting aid for the cache-timer config loader.
@@ -301,23 +301,6 @@ const autoPromptIds = new Set<string>(); // Immutable ledger of all generated au
 const warningToastFiredSessions = new Set<string>();
 const coldToastFiredSessions = new Set<string>();
 
-// Provider-response anchor (PHASE 2 — currently instrumentation only).
-//
-// The prompt-cache TTL clock starts when the provider FINISHES responding to a
-// request, not when the assistant "turn" completes. For a turn that emits a
-// long-running local tool call (bash sleep/watch) or an interactive Question,
-// `message.time.completed` lands only after the local blocking finishes — long
-// after the provider went silent and its cache clock started ticking. So
-// `time.completed` over-estimates remaining cache life in exactly the cases we
-// care about.
-//
-// The accurate anchor is the arrival time of the most recent `step-finish`
-// part (one provider request/response cycle ends). step-finish parts carry no
-// timestamp field, so we stamp Date.now() when the event arrives. We record it
-// per session here. The ticker will (in the next phase) prefer this over
-// time.completed when computing remaining cache life.
-const lastStepFinishAt = new Map<string, number>();
-
 // Pending interactive prompts (Question tool AND permission requests), keyed by
 // sessionID -> set of request/permission IDs awaiting the user.
 //
@@ -400,125 +383,7 @@ const tui: TuiPlugin = async (api, _options, _meta) => {
     debugLog(`api.ui.toast THREW: ${e?.message || e}`);
   }
 
-  // PHASE 2 INSTRUMENTATION: record provider-response anchor + log the gap
-  // between the step-finish arrival time and the assistant message's
-  // time.completed. If the theory holds, a turn containing a long local tool
-  // call (sleep/watch) or a pending Question will show a LARGE positive gap
-  // (time.completed >> step-finish arrival), proving time.completed is the
-  // wrong anchor. A normal quick turn should show a near-zero gap.
   try {
-    // step-finish marks the end of one provider request/response cycle.
-    // Delivered as a message.part.updated event whose part.type is "step-finish".
-    api.event.on("message.part.updated", (event: any) => {
-      try {
-        const part = event?.properties?.part;
-        if (!part || part.type !== "step-finish") return;
-        const sessionID: string | undefined = part.sessionID;
-        if (!sessionID) return;
-
-        const arrivalMs = Date.now();
-        lastStepFinishAt.set(sessionID, arrivalMs);
-
-        // For validation, also look up the assistant message's time.completed
-        // (if already set) to measure the gap. messageID lets us find it.
-        let completedGapMs: number | string = "n/a (not completed yet)";
-        // DISCRIMINATOR INSTRUMENTATION: to separate a REAL provider-response
-        // step-finish from a LATE finalization step-finish (one delivered when a
-        // pending Question/permission resolves, carrying the posing turn's
-        // already-generated tokens but stamped at resolve-time). Candidate
-        // signals:
-        //   - part.reason : the finish reason for this step.
-        //   - msg.time.created : when the assistant message began. If the model
-        //     produced its output long before this step-finish ARRIVED, then
-        //     (arrival - created) is large -> the step-finish is a late
-        //     finalization and arrivalMs is the WRONG cache anchor. A real
-        //     provider response arrives within ~seconds of message creation.
-        const reason: string | undefined = (part as any).reason;
-        let createdToArrivalMs: number | string = "n/a";
-        let completedToArrivalMs: number | string = "n/a";
-        const messageID: string | undefined = part.messageID;
-        if (messageID) {
-          const messages = api.state.session.messages(sessionID);
-          const msg = messages?.find((m: any) => m.id === messageID);
-          const completed = (msg as any)?.time?.completed;
-          const created = (msg as any)?.time?.created;
-          if (typeof completed === "number") {
-            completedGapMs = completed - arrivalMs;
-            completedToArrivalMs = arrivalMs - completed;
-          }
-          if (typeof created === "number") {
-            createdToArrivalMs = arrivalMs - created;
-          }
-        }
-
-        // TOKEN/USAGE INSTRUMENTATION (transient — for the reject-vs-real-write
-        // investigation). A step-finish part carries the provider usage for the
-        // request/response cycle it terminates. The decisive signal is the
-        // CACHE-WRITE token count: a real provider round-trip that primes the
-        // prompt cache reports a non-zero cache *write* (a.k.a. cache_creation /
-        // cache.write). A bare turn-finalization fired on question.rejected
-        // SHOULD report zero new input/output and zero cache write — proving the
-        // step-finish is a no-op and the anchor must NOT be refreshed from it.
-        //
-        // Field names vary across opencode/provider-SDK versions, so we probe
-        // several shapes defensively and dump the raw `tokens` object on first
-        // sight to lock down the exact schema. Never throws.
-        const tokens: any = (part as any).tokens ?? (part as any).usage ?? undefined;
-        const cost: any = (part as any).cost;
-        const cacheWrite =
-          tokens?.cache?.write ??
-          tokens?.cache_creation ??
-          tokens?.cacheCreation ??
-          tokens?.cache_creation_input_tokens ??
-          "n/a";
-        const cacheRead =
-          tokens?.cache?.read ??
-          tokens?.cache_read ??
-          tokens?.cacheRead ??
-          tokens?.cache_read_input_tokens ??
-          "n/a";
-        const inputTok = tokens?.input ?? tokens?.input_tokens ?? tokens?.prompt ?? "n/a";
-        const outputTok = tokens?.output ?? tokens?.output_tokens ?? tokens?.completion ?? "n/a";
-
-        if (!(globalThis as any).__ctStepFinishShapeProbed) {
-          (globalThis as any).__ctStepFinishShapeProbed = true;
-          // Full raw dump (minus snapshot, which can be huge) so we can inspect
-          // `reason` and any other fields that distinguish real vs finalization.
-          const { snapshot, ...partNoSnapshot } = (part as any) ?? {};
-          debugLog(
-            `step-finish SHAPE probe: partKeys=${JSON.stringify(Object.keys(part ?? {}))} ` +
-            `partRaw(noSnapshot)=${JSON.stringify(partNoSnapshot)} ` +
-            `tokensRaw=${JSON.stringify(tokens)} costRaw=${JSON.stringify(cost)}`
-          );
-        }
-
-        debugLog(
-          `step-finish session=${sessionID} msg=${messageID} ` +
-          `reason=${reason ?? "n/a"} ` +
-          `arrivalMs=${arrivalMs} time.completed-minus-arrival=${completedGapMs} ` +
-          `createdToArrival=${createdToArrivalMs}ms completedToArrival=${completedToArrivalMs}ms ` +
-          `input=${inputTok} output=${outputTok} cacheWrite=${cacheWrite} cacheRead=${cacheRead} ` +
-          `cost=${cost ?? "n/a"}`
-        );
-      } catch (innerErr) {
-        debugLog(`step-finish handler THREW: ${String(innerErr)}`);
-      }
-    });
-
-    // Also log session.idle (turn end) so we can correlate when time.completed
-    // actually lands relative to the step-finish we recorded earlier.
-    api.event.on("session.idle", (event: any) => {
-      try {
-        const sessionID: string | undefined = event?.properties?.sessionID;
-        if (!sessionID) return;
-        const anchor = lastStepFinishAt.get(sessionID);
-        const sinceStepFinish = anchor ? Date.now() - anchor : "n/a";
-        debugLog(`session.idle session=${sessionID} ms-since-last-step-finish=${sinceStepFinish}`);
-      } catch (innerErr) {
-        debugLog(`session.idle handler THREW: ${String(innerErr)}`);
-      }
-    });
-
     // Pending-interaction tracking via the event stream (the authoritative
     // signal — the question()/permission() state pollers proved unreliable).
     //
@@ -577,7 +442,7 @@ const tui: TuiPlugin = async (api, _options, _meta) => {
       }
     });
 
-    debugLog("registered event listeners (step-finish, session.idle, question.*, permission.*)");
+    debugLog("registered event listeners (question.*, permission.*)");
   } catch (e: any) {
     debugLog(`api.event.on THREW: ${e?.message || e}`);
   }
@@ -938,130 +803,6 @@ const tui: TuiPlugin = async (api, _options, _meta) => {
           try {
             const sessionStatus = api.state.session.status(session_id);
             const messages = api.state.session.messages(session_id);
-
-            // DEBUG: instrument status + pending-question count every tick so we
-            // can see what opencode actually reports while a Question modal is
-            // open (is it "busy"? is question() populated?). Remove once the
-            // question-pending toast behavior is verified.
-            try {
-              const dbgQuestions = api.state.session.question(session_id);
-
-              // One-time probe of the question() API shape: is it even a function
-              // on this version, and what does it return? Helps explain why
-              // questionCount has been 0 across every capture.
-              if (!(globalThis as any).__ctQuestionApiProbed) {
-                (globalThis as any).__ctQuestionApiProbed = true;
-                debugLog(
-                  `question() API probe: typeof api.state.session.question=` +
-                  `${typeof (api as any).state?.session?.question} ` +
-                  `returnType=${typeof dbgQuestions} ` +
-                  `raw=${JSON.stringify(dbgQuestions)} ` +
-                  `stateSessionKeys=${JSON.stringify(Object.keys((api as any).state?.session ?? {}))}`
-                );
-              }
-
-              // Probe permission() AND the message-PARTS accessor api.state.part(msgID).
-              // The Question tool likely surfaces as a tool part on the latest
-              // assistant message (messages() itself carries no parts; parts are
-              // fetched separately by messageID). Scan the newest assistant
-              // message's parts for a pending/running tool that looks like a
-              // question/elicitation/ask.
-              try {
-                const dbgPerm = (api as any).state?.session?.permission?.(session_id);
-                if (!(globalThis as any).__ctPermApiProbed) {
-                  (globalThis as any).__ctPermApiProbed = true;
-                  debugLog(`permission() API probe: type=${typeof dbgPerm} raw=${JSON.stringify(dbgPerm)}`);
-                }
-                const permLen = Array.isArray(dbgPerm) ? dbgPerm.length : (dbgPerm ? 1 : 0);
-                if (permLen > 0) {
-                  debugLog(`PERMISSION pending session=${session_id} count=${permLen} raw=${JSON.stringify(dbgPerm)}`);
-                }
-
-                // Parts probe via api.state.part(messageID).
-                const partFn = (api as any).state?.part;
-                if (typeof partFn === "function" && messages && messages.length > 0) {
-                  const lastMsgId = (messages[messages.length - 1] as any)?.id;
-                  if (lastMsgId) {
-                    const parts = partFn(lastMsgId);
-                    if (!(globalThis as any).__ctPartFnProbed) {
-                      (globalThis as any).__ctPartFnProbed = true;
-                      const summary = Array.isArray(parts)
-                        ? parts.map((p: any) => p?.type === "tool" ? `tool:${p?.tool}:${p?.state?.status}` : p?.type).join(",")
-                        : typeof parts;
-                      debugLog(`part(msgID) API probe: msgId=${lastMsgId} type=${typeof parts} parts=[${summary}]`);
-                    }
-                    if (Array.isArray(parts)) {
-                      const pendingTool = parts.find((p: any) =>
-                        p?.type === "tool" &&
-                        (p?.state?.status === "pending" || p?.state?.status === "running")
-                      );
-                      if (pendingTool) {
-                        debugLog(`PART pending-tool session=${session_id} tool=${(pendingTool as any)?.tool} status=${(pendingTool as any)?.state?.status}`);
-                      }
-                    }
-                  }
-                }
-              } catch (permErr) {
-                debugLog(`permission()/part() probe THREW: ${String(permErr)}`);
-              }
-
-              // Probe the newest message's PARTS while the timer is in WARNING/COLD
-              // and we suspect a question is pending. A pending Question/elicitation
-              // likely surfaces as a tool part in pending/running state. Log the
-              // part types + tool states of the last message so we can detect it.
-              if (messages && messages.length > 0) {
-                const lastM: any = messages[messages.length - 1];
-                const parts = lastM?.parts;
-                if (parts && Array.isArray(parts)) {
-                  const partSummary = parts.map((p: any) =>
-                    p?.type === "tool"
-                      ? `tool:${p?.tool}:${p?.state?.status}`
-                      : String(p?.type)
-                  ).join(",");
-                  if (/pending|running/.test(partSummary) || /ask|question|elicit/i.test(partSummary)) {
-                    debugLog(`PARTS probe lastMsgRole=${lastM?.role} parts=[${partSummary}]`);
-                  }
-                } else if (!(globalThis as any).__ctPartsShapeProbed) {
-                  (globalThis as any).__ctPartsShapeProbed = true;
-                  debugLog(`PARTS shape probe: lastMsg keys=${JSON.stringify(Object.keys(lastM ?? {}))} hasParts=${!!parts}`);
-                }
-              }
-
-              // Compare the two candidate anchors live, every tick:
-              //   (A) time.completed/time.created (current behavior)
-              //   (B) step-finish arrival time (proposed behavior)
-              // and the remaining cache seconds each implies. During a sleep/
-              // watch/question, (B) should drop toward COLD while (A) lags.
-              let dbgCompletedAnchor: number | undefined;
-              if (messages && messages.length > 0) {
-                for (let i = messages.length - 1; i >= 0; i--) {
-                  const t = messages[i].time?.completed ?? messages[i].time?.created;
-                  if (t) { dbgCompletedAnchor = t; break; }
-                }
-              }
-              const dbgStepFinishAnchor = lastStepFinishAt.get(session_id);
-              const dbgLastMsg = messages && messages.length > 0 ? messages[messages.length - 1] : undefined;
-              const dbgModelId = dbgLastMsg
-                ? (dbgLastMsg.role === "user" ? dbgLastMsg.model?.modelID : dbgLastMsg.modelID)
-                : undefined;
-              const dbgDurationSec = getCacheDuration(dbgModelId);
-              const now = Date.now();
-              const remA = dbgCompletedAnchor !== undefined
-                ? Math.round((dbgDurationSec * 1000 - (now - dbgCompletedAnchor)) / 1000)
-                : "n/a";
-              const remB = dbgStepFinishAnchor !== undefined
-                ? Math.round((dbgDurationSec * 1000 - (now - dbgStepFinishAnchor)) / 1000)
-                : "n/a";
-
-              debugLog(
-                `tick session=${session_id} status=${sessionStatus?.type ?? "undefined"} ` +
-                `questionCount=${dbgQuestions?.length ?? 0} cacheState=${cacheState()} ` +
-                `durationSec=${dbgDurationSec} ` +
-                `remainingA(time.completed)=${remA}s remainingB(step-finish)=${remB}s`
-              );
-            } catch (dbgErr) {
-              debugLog(`tick question() THREW: ${String(dbgErr)}`);
-            }
 
             // User-message ledgering MUST run every tick, including while the session
             // is busy. If we skip it during busy, the auto-prompt's user-message id
