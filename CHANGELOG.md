@@ -4,7 +4,94 @@ All notable changes to `cache-timer` are documented here. The format is
 loosely based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [1.2.0] - 2026-05-29
+
+### Added
+- **Live cache countdown during busy turns.** Previously the countdown froze to
+  a static `Cache: HOT (Busy)` whenever opencode was processing a turn. The
+  prompt-cache TTL clock keeps ticking during a long-running local tool call
+  (e.g. a `bash sleep`/`watch`), so freezing hid a real countdown — and the
+  cache could silently expire mid-turn with the UI still claiming HOT. The
+  timer now stays live while busy: `Cache: HOT (MM:SS)`, going yellow
+  under one minute, exactly like the idle countdown (no ` Busy` suffix, so the
+  text doesn't bounce between busy/idle states).
+- **`busy-cold` state + Stop & fork.** When the cache expires while a turn
+  is still running, the timer now tells the truth (`Cache: COLD (BUSY)`) and
+  surfaces a single blue **`✨ Stop & fork`** button (in-flight label
+  `Stopping...`). Clicking it aborts the running turn (`session.abort`) and
+  forks a fresh chat seeded from the interrupted output — instead of resuming
+  against a cold cache and paying the full cold-start tax. Doing nothing is
+  still a valid choice; the button is an option, not a forced action.
+- **Global cold-cache toast watcher for pending prompts.** A single module-level
+  watcher fires the "cache nearly cold" / "cache cold" toasts whenever a
+  question **or permission** prompt is pending — not just questions, and not
+  tied to a UI slot's lifecycle. The cold toast lasts 24h so a user returning
+  from a long break (lunch, overnight) still sees the warning behind the modal
+  before they answer and pay the cold-cache tax. In `busy-cold` it points the
+  returning user at `✨ Stop & fork`.
+
+### Changed
+- **Cache state is the source of truth.** opencode's local "busy" execution
+  status no longer masks the cache reality. If the provider cache is cold, the
+  user sees COLD regardless of whether a turn is running.
+
+### Fixed
+- **Queued user messages no longer reset the timer.** A user message typed and
+  submitted while the session is still busy is created locally but never sent
+  to the provider, so it does not refresh the cache. The busy anchor considers
+  **assistant** messages only, so a queued user message no longer falsely jumps
+  the countdown back to full.
+- **Cache timer no longer falsely resets to FULL when an interactive prompt
+  resolves.** Root cause (proven via instrumentation): a posing turn's
+  assistant message has `time.created` stamped at provider-response start (when
+  the prompt-cache window resets) but `time.completed` **and** the step-finish
+  arrival are restamped at turn *resolution*. For an interactive turn,
+  resolution is delayed by however long the user sat on the prompt, so both
+  signals jumped to ~now on resolve and reset the timer to FULL — masking a
+  genuinely cold cache. All three cache-math sites now anchor on the newest
+  **assistant** message's `time.created`, which is never restamped. The
+  now-unreliable step-finish arrival anchor was dropped.
+- **Lingering cold toast is now swept on prompt resolve.** Because the cold
+  toast is long-lived (24h) it won't self-clear, so on resolve the watcher
+  emits a single near-invisible sweeper toast (blank text, 1ms) — exploiting
+  opencode clearing all toasts when a new one is emitted. The sweeper is
+  deliberately blank rather than "cache refreshed", which would be false on
+  cancel or when the cache is still cold. Also fixed a race where the slot's
+  `onCleanup` deleted the session from the toast fired-sets on reply (the slot
+  remounts as the turn continues), beating the watcher's re-arm loop and
+  stealing the resolve signal so no sweeper fired on reply. The global watcher
+  is now the sole owner of the fired-sets and reliably sweeps on both reply and
+  reject.
+
+### Removed
+- **High-volume debug instrumentation.** The per-tick `/tmp/cache-timer-debug.log`
+  block (API probes, PARTS probes, dual remaining-time anchors, per-second
+  `tick` line) and the now-unused `step-finish` / `session.idle` handlers were
+  removed — they earned their keep during the `time.created` investigation above
+  but would otherwise bloat the debug log without bound. Low-volume,
+  event-driven logging (config load, init, error handlers, prompt lifecycle,
+  resolve-sweeper) is retained. The debugging workflow and event-stream
+  learnings are preserved in `docs/DEBUGGING.md`.
+
+## [1.1.2] - 2026-05-28
+
+### Added
+- **Question-pending toast notifications.** When opencode's Question tool
+  opens a modal, the session pauses waiting on the user — if the user tabs
+  away or walks off and comes back N minutes later, they answer the question
+  and immediately pay the cold-cache tax without ever seeing the COLD UI
+  indicator behind the modal. The plugin now fires up to two toasts while a
+  question is pending:
+  - A **yellow "Cache nearly cold" warning** (1-min duration) when the cache
+    enters the WARNING state (<1 min remaining).
+  - A **blue "Cache cold" info toast** (5-min duration) when the cache enters
+    the COLD state.
+
+  Each toast fires at most once per pending-question episode; both dedupes
+  re-arm automatically when the question resolves so subsequent queued
+  questions get fresh notifications. Toasts only fire while a question is
+  pending — during normal interactive use the existing `session_prompt_right`
+  countdown is the single source of truth (no redundant noise).
 
 ## [1.1.1] - 2026-05-28
 
