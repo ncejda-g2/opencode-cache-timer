@@ -10,7 +10,7 @@ import { join } from "node:path"
 // package.json on release; surfacing it in the load toast is a cheap way to
 // verify which build is actually running (especially useful when iterating
 // against the cached npm install under ~/.cache/opencode/packages).
-const CACHE_TIMER_VERSION = "1.2.0-question-test.4"
+const CACHE_TIMER_VERSION = "1.2.0-question-test.5"
 
 // DEBUG: file-based logger. Useful when toast stacking obscures init details
 // and as a permanent troubleshooting aid for the cache-timer config loader.
@@ -115,6 +115,25 @@ function remainingCacheSecondsFor(api: TuiPluginApi, sessionID: string): number 
   }
 
   // Newest assistant message: model id + timestamp anchor.
+  //
+  // ANCHOR = newest assistant message's time.CREATED (not time.completed, not
+  // step-finish arrival). Proven via instrumentation (v1.2.0-question-test.4):
+  // for a turn that posed a Question/permission, the assistant message's
+  // time.created is stamped when the provider STARTS responding (the moment the
+  // prompt-cache window resets), while time.completed AND the step-finish
+  // arrival are both restamped at turn-RESOLUTION — which for an interactive
+  // turn is delayed by the entire time the user sat on the prompt (observed:
+  // created=13:40:05 vs completed/step-finish=13:40:50, a 45s lie). Anchoring on
+  // those restamped values falsely reset the timer to FULL on resolve, masking a
+  // genuinely cold cache (that turn was cacheRead=0, input=101838 — a full-price
+  // cold read). time.created never restamps, so it is the only correct anchor.
+  //
+  // Multi-round-trip turns are handled correctly because opencode creates a NEW
+  // assistant message (with a fresh time.created) for every provider round-trip
+  // (verified: each step-finish carries a distinct messageID). So the NEWEST
+  // assistant message's time.created tracks the most recent provider response —
+  // including mid-turn cache refreshes — without needing the unreliable
+  // step-finish arrival stamp.
   let modelId: string | undefined;
   let messageAnchor: number | undefined;
   if (messages && messages.length > 0) {
@@ -122,22 +141,15 @@ function remainingCacheSecondsFor(api: TuiPluginApi, sessionID: string): number 
       const m: any = messages[i];
       if (m.role !== "assistant") continue;
       if (modelId === undefined) modelId = m.modelID;
-      const t = m.time?.completed ?? m.time?.created;
+      const t = m.time?.created ?? m.time?.completed;
       if (t) { messageAnchor = t; break; }
     }
   }
 
-  const stepFinishAnchor = lastStepFinishAt.get(sessionID);
-  let anchor: number | undefined;
-  if (stepFinishAnchor !== undefined && messageAnchor !== undefined) {
-    anchor = Math.max(stepFinishAnchor, messageAnchor);
-  } else {
-    anchor = stepFinishAnchor ?? messageAnchor;
-  }
-  if (anchor === undefined) return undefined;
+  if (messageAnchor === undefined) return undefined;
 
   const durationSec = getCacheDuration(modelId);
-  return Math.round((durationSec * 1000 - (Date.now() - anchor)) / 1000);
+  return Math.round((durationSec * 1000 - (Date.now() - messageAnchor)) / 1000);
 }
 
 // Build the seed prompt for a brand-new chat that picks up where a stale
@@ -1070,39 +1082,34 @@ const tui: TuiPlugin = async (api, _options, _meta) => {
             // interrupted output, or let the long task finish and knowingly pay
             // the cold-start tax).
             //
-            // Anchor selection while busy: use the FRESHEST of two signals,
-            // not step-finish alone.
+            // Anchor selection: the newest ASSISTANT message's time.CREATED.
             //
-            //   (A) newest ASSISTANT message time.completed/time.created
-            //   (B) last step-finish arrival time
+            // time.created is stamped the moment the provider STARTS responding
+            // (≈ request received, prompt-cache window reset). We previously also
+            // consulted time.completed and the step-finish arrival time and took
+            // the max(), but instrumentation (v1.2.0-question-test.4) proved both
+            // of those are restamped at turn-RESOLUTION, not provider-response
+            // time. For a turn that posed a Question/permission, resolution is
+            // delayed by however long the user sat on the prompt, so both signals
+            // jumped to ~now on resolve and falsely reset the timer to FULL —
+            // masking a genuinely cold cache (observed: created=:05 vs
+            // completed/step-finish=:50, while that very turn was cacheRead=0,
+            // input=101838, a full-price COLD read). time.created never restamps.
             //
-            // Both mark "the provider touched the cache", but update at
-            // different moments and either can be the stale laggard:
+            // Multi-round-trip turns stay correct: opencode creates a NEW
+            // assistant message (fresh time.created) for EACH provider round-trip
+            // (verified — each step-finish carries a distinct messageID), so the
+            // newest assistant message's time.created already tracks the most
+            // recent provider response, including mid-turn cache refreshes. This
+            // is why we no longer need the step-finish arrival stamp at all.
             //
-            //   - When a NEW turn begins, the assistant message is created the
-            //     moment the provider starts responding (≈ request received,
-            //     cache window reset), but step-finish (B) only fires when that
-            //     response FINISHES — often several seconds later. Trusting B
-            //     alone during that gap reads a STALE anchor from the previous
-            //     turn and falsely renders "busy-cold" even though the turn (and
-            //     thus the cache) is fresh. (Observed: A=69s while B=-26s for
-            //     ~6s at turn start.)
-            //
-            //   - Within a single long turn, B is the precise moment the provider
-            //     went quiet, which is what we proved correct in the 180s test.
-            //
-            // CRITICAL: anchor (A) is derived ONLY from ASSISTANT messages, never
+            // CRITICAL: the anchor is derived ONLY from ASSISTANT messages, never
             // user messages. A queued user message (typed + submitted while the
-            // session is still busy) stamps a fresh `time.created` immediately,
-            // but it has NOT been sent to the provider — no round-trip, no cache
-            // refresh. Anchoring on it would falsely reset the timer to full.
-            // The provider only touches the cache when it actually engages the
-            // turn, which is exactly when the corresponding AssistantMessage is
-            // created. So a queued user message correctly does NOT bump (A).
-            //
-            // Taking max() of (A) and (B) is robust to both stale directions: a
-            // fresh turn's assistant timestamp wins over a stale step-finish, and
-            // a mid-turn step-finish wins over an older assistant timestamp.
+            // session is still busy) stamps a fresh time.created immediately, but
+            // it has NOT been sent to the provider — no round-trip, no cache
+            // refresh. Anchoring on it would falsely reset the timer to full. The
+            // provider only touches the cache when it actually engages the turn,
+            // which is exactly when the corresponding AssistantMessage is created.
             if (sessionStatus?.type === "busy") {
               let busyModelId: string | undefined;
               if (messages && messages.length > 0) {
@@ -1116,27 +1123,18 @@ const tui: TuiPlugin = async (api, _options, _meta) => {
               }
               const busyDurationSec = getCacheDuration(busyModelId);
 
-              const stepFinishAnchor = lastStepFinishAt.get(session_id);
-              // Assistant-only message anchor: ignore queued user messages.
-              let messageAnchor: number | undefined;
+              // Newest assistant message's time.created (ignore queued user msgs).
+              let busyAnchor: number | undefined;
               if (messages && messages.length > 0) {
                 for (let i = messages.length - 1; i >= 0; i--) {
                   const m = messages[i];
                   if (m.role !== "assistant") continue;
-                  const t = m.time?.completed ?? m.time?.created;
+                  const t = m.time?.created ?? m.time?.completed;
                   if (t) {
-                    messageAnchor = t;
+                    busyAnchor = t;
                     break;
                   }
                 }
-              }
-
-              // Freshest wins. undefined-safe: if only one exists, use it.
-              let busyAnchor: number | undefined;
-              if (stepFinishAnchor !== undefined && messageAnchor !== undefined) {
-                busyAnchor = Math.max(stepFinishAnchor, messageAnchor);
-              } else {
-                busyAnchor = stepFinishAnchor ?? messageAnchor;
               }
 
               if (busyAnchor === undefined) {
@@ -1176,20 +1174,27 @@ const tui: TuiPlugin = async (api, _options, _meta) => {
               return
             }
 
-            const lastMsg = messages[messages.length - 1]
-            const currentModelId = lastMsg.role === "user" ? lastMsg.model?.modelID : lastMsg.modelID;
-            const totalDurationSec = getCacheDuration(currentModelId);
-
-            // Robustly resolve the most recent valid timestamp in the session history (handles active streaming)
+            // Anchor on the newest ASSISTANT message's time.created — the moment
+            // the provider started responding (cache window reset). See the busy
+            // branch above and remainingCacheSecondsFor() for the full rationale:
+            // time.completed is restamped at turn-resolution (delayed by however
+            // long an interactive prompt sat open) and would falsely reset the
+            // timer to FULL on resolve; time.created never restamps. We also scan
+            // ASSISTANT messages only — a trailing user message has no provider
+            // round-trip and must not anchor the cache clock.
+            let currentModelId: string | undefined;
             let lastTime: number | undefined;
             for (let i = messages.length - 1; i >= 0; i--) {
               const msg = messages[i];
-              const t = msg.time?.completed ?? msg.time?.created;
+              if (msg.role !== "assistant") continue;
+              if (currentModelId === undefined) currentModelId = msg.modelID;
+              const t = msg.time?.created ?? msg.time?.completed;
               if (t) {
                 lastTime = t;
                 break;
               }
             }
+            const totalDurationSec = getCacheDuration(currentModelId);
 
             if (!lastTime) {
               setTimeText(`Cache: HOT (${formatTimeText(totalDurationSec)})`)
