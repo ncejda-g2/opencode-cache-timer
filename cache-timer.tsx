@@ -10,7 +10,7 @@ import { join } from "node:path"
 // package.json on release; surfacing it in the load toast is a cheap way to
 // verify which build is actually running (especially useful when iterating
 // against the cached npm install under ~/.cache/opencode/packages).
-const CACHE_TIMER_VERSION = "1.2.0"
+const CACHE_TIMER_VERSION = "1.2.0-question-test.2"
 
 // DEBUG: file-based logger. Useful when toast stacking obscures init details
 // and as a permanent troubleshooting aid for the cache-timer config loader.
@@ -98,6 +98,46 @@ function getCacheDuration(modelId: string | undefined): number {
     }
   }
   return defaultDuration;
+}
+
+// Compute remaining prompt-cache seconds for a session from module-global state,
+// independent of any TUI slot. Used by the global interaction watcher (the
+// per-slot ticker is suspended while a Question/permission modal is open, so it
+// cannot drive the cold-cache toasts during exactly the window they matter).
+// Mirrors the slot ticker's freshest-anchor logic: max(step-finish arrival,
+// newest assistant-message timestamp). Returns undefined if no anchor is known.
+function remainingCacheSecondsFor(api: TuiPluginApi, sessionID: string): number | undefined {
+  let messages: ReadonlyArray<any> | undefined;
+  try {
+    messages = api.state.session.messages(sessionID);
+  } catch {
+    return undefined;
+  }
+
+  // Newest assistant message: model id + timestamp anchor.
+  let modelId: string | undefined;
+  let messageAnchor: number | undefined;
+  if (messages && messages.length > 0) {
+    for (let i = messages.length - 1; i >= 0; i--) {
+      const m: any = messages[i];
+      if (m.role !== "assistant") continue;
+      if (modelId === undefined) modelId = m.modelID;
+      const t = m.time?.completed ?? m.time?.created;
+      if (t) { messageAnchor = t; break; }
+    }
+  }
+
+  const stepFinishAnchor = lastStepFinishAt.get(sessionID);
+  let anchor: number | undefined;
+  if (stepFinishAnchor !== undefined && messageAnchor !== undefined) {
+    anchor = Math.max(stepFinishAnchor, messageAnchor);
+  } else {
+    anchor = stepFinishAnchor ?? messageAnchor;
+  }
+  if (anchor === undefined) return undefined;
+
+  const durationSec = getCacheDuration(modelId);
+  return Math.round((durationSec * 1000 - (Date.now() - anchor)) / 1000);
 }
 
 // Build the seed prompt for a brand-new chat that picks up where a stale
@@ -266,6 +306,43 @@ const coldToastFiredSessions = new Set<string>();
 // time.completed when computing remaining cache life.
 const lastStepFinishAt = new Map<string, number>();
 
+// Pending interactive prompts (Question tool AND permission requests), keyed by
+// sessionID -> set of request/permission IDs awaiting the user.
+//
+// WHY EVENTS, NOT POLLING: the TUI state pollers `api.state.session.question()`
+// and `.permission()` returned empty on every tick across extensive captures —
+// they are not reliable in this opencode version. The authoritative signal is
+// the event stream: opencode emits `question.asked`/`question.replied`/
+// `question.rejected` and `permission.updated`/`permission.replied`. We track
+// open requests here and clear them on reply/reject, giving the ticker a
+// dependable "is an interaction pending" signal for both the countdown and the
+// cold-cache toasts. We key by ID (not a boolean) so overlapping prompts in one
+// session are reference-counted correctly.
+const pendingInteractions = new Map<string, Set<string>>();
+
+function addPendingInteraction(sessionID: string, requestID: string): void {
+  if (!sessionID || !requestID) return;
+  let set = pendingInteractions.get(sessionID);
+  if (!set) {
+    set = new Set<string>();
+    pendingInteractions.set(sessionID, set);
+  }
+  set.add(requestID);
+}
+
+function clearPendingInteraction(sessionID: string, requestID: string): void {
+  if (!sessionID) return;
+  const set = pendingInteractions.get(sessionID);
+  if (!set) return;
+  if (requestID) set.delete(requestID);
+  if (set.size === 0) pendingInteractions.delete(sessionID);
+}
+
+function hasPendingInteraction(sessionID: string): boolean {
+  const set = pendingInteractions.get(sessionID);
+  return !!set && set.size > 0;
+}
+
 // When we fire an auto-summary, we record the user-message count of the session
 // AT trigger time. The next user message that appears beyond this count is
 // definitionally the auto-prompt itself, so we ledger it as auto regardless of
@@ -366,9 +443,131 @@ const tui: TuiPlugin = async (api, _options, _meta) => {
       }
     });
 
-    debugLog("registered phase-2 event listeners (message.part.updated/step-finish, session.idle)");
+    // Pending-interaction tracking via the event stream (the authoritative
+    // signal — the question()/permission() state pollers proved unreliable).
+    //
+    // Question tool lifecycle: question.asked -> question.replied|rejected.
+    //   question.asked   props = QuestionRequest { id, sessionID, questions[] }
+    //   question.replied props = { sessionID, requestID, answers[] }
+    //   question.rejected props = { sessionID, requestID }
+    api.event.on("question.asked", (event: any) => {
+      try {
+        const p = event?.properties ?? {};
+        if (p.sessionID && p.id) {
+          addPendingInteraction(p.sessionID, p.id);
+          debugLog(`question.asked session=${p.sessionID} id=${p.id}`);
+        }
+      } catch (innerErr) {
+        debugLog(`question.asked handler THREW: ${String(innerErr)}`);
+      }
+    });
+    for (const evt of ["question.replied", "question.rejected"]) {
+      api.event.on(evt, (event: any) => {
+        try {
+          const p = event?.properties ?? {};
+          if (p.sessionID) {
+            clearPendingInteraction(p.sessionID, p.requestID);
+            debugLog(`${evt} session=${p.sessionID} requestID=${p.requestID}`);
+          }
+        } catch (innerErr) {
+          debugLog(`${evt} handler THREW: ${String(innerErr)}`);
+        }
+      });
+    }
+
+    // Permission lifecycle: permission.updated -> permission.replied.
+    //   permission.updated  props = Permission { id, sessionID, ... }
+    //   permission.replied  props = { sessionID, permissionID, response }
+    api.event.on("permission.updated", (event: any) => {
+      try {
+        const p = event?.properties ?? {};
+        if (p.sessionID && p.id) {
+          addPendingInteraction(p.sessionID, p.id);
+          debugLog(`permission.updated session=${p.sessionID} id=${p.id}`);
+        }
+      } catch (innerErr) {
+        debugLog(`permission.updated handler THREW: ${String(innerErr)}`);
+      }
+    });
+    api.event.on("permission.replied", (event: any) => {
+      try {
+        const p = event?.properties ?? {};
+        if (p.sessionID) {
+          clearPendingInteraction(p.sessionID, p.permissionID);
+          debugLog(`permission.replied session=${p.sessionID} permissionID=${p.permissionID}`);
+        }
+      } catch (innerErr) {
+        debugLog(`permission.replied handler THREW: ${String(innerErr)}`);
+      }
+    });
+
+    debugLog("registered event listeners (step-finish, session.idle, question.*, permission.*)");
   } catch (e: any) {
     debugLog(`api.event.on THREW: ${e?.message || e}`);
+  }
+
+  // GLOBAL interaction-toast watcher (module-level, NOT per-slot).
+  //
+  // Why this can't live in the slot ticker: when a Question/permission modal is
+  // open, the focused session's `session_prompt_right` slot is suspended — its
+  // setInterval stops firing for the entire duration of the prompt (verified:
+  // ~46s tick gap exactly spanning a question). That is precisely the window the
+  // cold-cache toasts are meant for, so they must be driven independently.
+  //
+  // This single interval runs for the whole TUI lifetime. Each second it visits
+  // every session with a pending interaction (populated by the question.*/
+  // permission.* event handlers, which keep firing while the modal is open) and
+  // toasts as the cache crosses WARNING (<60s) and COLD (<=0). Dedupe sets keep
+  // each toast to once per pending episode; they re-arm when the interaction
+  // resolves (the session drops out of pendingInteractions).
+  try {
+    const interactionWatcher = setInterval(() => {
+      try {
+        // Re-arm dedupes for sessions that no longer have a pending interaction.
+        for (const sid of Array.from(warningToastFiredSessions)) {
+          if (!hasPendingInteraction(sid)) warningToastFiredSessions.delete(sid);
+        }
+        for (const sid of Array.from(coldToastFiredSessions)) {
+          if (!hasPendingInteraction(sid)) coldToastFiredSessions.delete(sid);
+        }
+
+        for (const [sid, set] of pendingInteractions) {
+          if (!set || set.size === 0) continue;
+          const remaining = remainingCacheSecondsFor(api, sid);
+          if (remaining === undefined) continue;
+
+          if (remaining <= 0) {
+            if (!coldToastFiredSessions.has(sid)) {
+              coldToastFiredSessions.add(sid);
+              api.ui.toast({
+                variant: "info",
+                title: "Cache cold",
+                message: "Cache has expired while a prompt is pending. Consider ✨ New chat / Interrupt & fork instead of answering, to avoid paying the cold-start tax.",
+                duration: 300_000,
+              });
+            }
+          } else if (remaining < 60) {
+            if (!warningToastFiredSessions.has(sid)) {
+              warningToastFiredSessions.add(sid);
+              api.ui.toast({
+                variant: "warning",
+                title: "Cache nearly cold",
+                message: "Cache expires in <1 min. Answer or dismiss the prompt soon to avoid the cold-start tax.",
+                duration: 60_000,
+              });
+            }
+          }
+        }
+      } catch (innerErr) {
+        debugLog(`interactionWatcher tick THREW: ${String(innerErr)}`);
+      }
+    }, 1000);
+    // Never cleaned up: lives for the TUI process lifetime, like the event
+    // listeners above. There is no teardown hook at this scope.
+    void interactionWatcher;
+    debugLog("started global interaction-toast watcher");
+  } catch (e: any) {
+    debugLog(`interactionWatcher setup THREW: ${e?.message || e}`);
   }
 
   // Defensive wrap on slot registration for the same reason as above.
@@ -633,6 +832,87 @@ const tui: TuiPlugin = async (api, _options, _meta) => {
             try {
               const dbgQuestions = api.state.session.question(session_id);
 
+              // One-time probe of the question() API shape: is it even a function
+              // on this version, and what does it return? Helps explain why
+              // questionCount has been 0 across every capture.
+              if (!(globalThis as any).__ctQuestionApiProbed) {
+                (globalThis as any).__ctQuestionApiProbed = true;
+                debugLog(
+                  `question() API probe: typeof api.state.session.question=` +
+                  `${typeof (api as any).state?.session?.question} ` +
+                  `returnType=${typeof dbgQuestions} ` +
+                  `raw=${JSON.stringify(dbgQuestions)} ` +
+                  `stateSessionKeys=${JSON.stringify(Object.keys((api as any).state?.session ?? {}))}`
+                );
+              }
+
+              // Probe permission() AND the message-PARTS accessor api.state.part(msgID).
+              // The Question tool likely surfaces as a tool part on the latest
+              // assistant message (messages() itself carries no parts; parts are
+              // fetched separately by messageID). Scan the newest assistant
+              // message's parts for a pending/running tool that looks like a
+              // question/elicitation/ask.
+              try {
+                const dbgPerm = (api as any).state?.session?.permission?.(session_id);
+                if (!(globalThis as any).__ctPermApiProbed) {
+                  (globalThis as any).__ctPermApiProbed = true;
+                  debugLog(`permission() API probe: type=${typeof dbgPerm} raw=${JSON.stringify(dbgPerm)}`);
+                }
+                const permLen = Array.isArray(dbgPerm) ? dbgPerm.length : (dbgPerm ? 1 : 0);
+                if (permLen > 0) {
+                  debugLog(`PERMISSION pending session=${session_id} count=${permLen} raw=${JSON.stringify(dbgPerm)}`);
+                }
+
+                // Parts probe via api.state.part(messageID).
+                const partFn = (api as any).state?.part;
+                if (typeof partFn === "function" && messages && messages.length > 0) {
+                  const lastMsgId = (messages[messages.length - 1] as any)?.id;
+                  if (lastMsgId) {
+                    const parts = partFn(lastMsgId);
+                    if (!(globalThis as any).__ctPartFnProbed) {
+                      (globalThis as any).__ctPartFnProbed = true;
+                      const summary = Array.isArray(parts)
+                        ? parts.map((p: any) => p?.type === "tool" ? `tool:${p?.tool}:${p?.state?.status}` : p?.type).join(",")
+                        : typeof parts;
+                      debugLog(`part(msgID) API probe: msgId=${lastMsgId} type=${typeof parts} parts=[${summary}]`);
+                    }
+                    if (Array.isArray(parts)) {
+                      const pendingTool = parts.find((p: any) =>
+                        p?.type === "tool" &&
+                        (p?.state?.status === "pending" || p?.state?.status === "running")
+                      );
+                      if (pendingTool) {
+                        debugLog(`PART pending-tool session=${session_id} tool=${(pendingTool as any)?.tool} status=${(pendingTool as any)?.state?.status}`);
+                      }
+                    }
+                  }
+                }
+              } catch (permErr) {
+                debugLog(`permission()/part() probe THREW: ${String(permErr)}`);
+              }
+
+              // Probe the newest message's PARTS while the timer is in WARNING/COLD
+              // and we suspect a question is pending. A pending Question/elicitation
+              // likely surfaces as a tool part in pending/running state. Log the
+              // part types + tool states of the last message so we can detect it.
+              if (messages && messages.length > 0) {
+                const lastM: any = messages[messages.length - 1];
+                const parts = lastM?.parts;
+                if (parts && Array.isArray(parts)) {
+                  const partSummary = parts.map((p: any) =>
+                    p?.type === "tool"
+                      ? `tool:${p?.tool}:${p?.state?.status}`
+                      : String(p?.type)
+                  ).join(",");
+                  if (/pending|running/.test(partSummary) || /ask|question|elicit/i.test(partSummary)) {
+                    debugLog(`PARTS probe lastMsgRole=${lastM?.role} parts=[${partSummary}]`);
+                  }
+                } else if (!(globalThis as any).__ctPartsShapeProbed) {
+                  (globalThis as any).__ctPartsShapeProbed = true;
+                  debugLog(`PARTS shape probe: lastMsg keys=${JSON.stringify(Object.keys(lastM ?? {}))} hasParts=${!!parts}`);
+                }
+              }
+
               // Compare the two candidate anchors live, every tick:
               //   (A) time.completed/time.created (current behavior)
               //   (B) step-finish arrival time (proposed behavior)
@@ -814,22 +1094,6 @@ const tui: TuiPlugin = async (api, _options, _meta) => {
                 setTimeText("Cache: COLD (BUSY)")
                 setColor("#3B82F6") // Blue (COLD)
                 setCacheState("busy-cold")
-
-                // If a Question is pending while the cache goes cold mid-turn,
-                // the user may be away behind the modal and unaware. Mirror the
-                // idle cold toast here (the busy branch returns early, so the
-                // toast block below never runs in this state). Same dedupe set
-                // keeps it to once per cold episode.
-                const bcQuestions = api.state.session.question(session_id);
-                if (bcQuestions && bcQuestions.length > 0 && !coldToastFiredSessions.has(session_id)) {
-                  coldToastFiredSessions.add(session_id);
-                  api.ui.toast({
-                    variant: "info",
-                    title: "Cache cold",
-                    message: "Cache expired while a question is pending and the turn is still running. Use ✨ Interrupt & fork to continue in a fresh chat instead of resuming against a cold cache.",
-                    duration: 300_000, // 5 min — long enough to catch a returning user
-                  });
-                }
               } else {
                 const busyMinutes = Math.floor(busyRemainingMs / 1000 / 60)
                 const busySeconds = Math.floor((busyRemainingMs / 1000) % 60)
@@ -945,53 +1209,10 @@ const tui: TuiPlugin = async (api, _options, _meta) => {
               }
             }
 
-            // ===== Question-pending toast notifications =====
-            //
-            // Motivation: when opencode's Question tool opens a modal, the
-            // session is paused waiting on the user. If the user tabs away or
-            // walks off and comes back N minutes later, they answer the
-            // question and immediately pay the cold-cache tax — without ever
-            // seeing the COLD UI indicator behind the modal.
-            //
-            // The countdown timer itself is visible in `session_prompt_right`
-            // regardless, so we deliberately do NOT toast when the cache goes
-            // cold during normal interactive use — that would be redundant
-            // noise. Toasts only fire when a question is *currently pending*.
-            //
-            // Each toast fires at most once per pending-question episode (per
-            // cache-state transition). When the question resolves (list goes
-            // empty), both dedupe entries clear, so the next pending question
-            // gets fresh toasts if/when it crosses warning or cold again.
-            const pendingQuestions = api.state.session.question(session_id);
-            const questionIsPending = pendingQuestions && pendingQuestions.length > 0;
-            const currentCacheState = cacheState();
-
-            if (questionIsPending) {
-              if (currentCacheState === "warning" && !warningToastFiredSessions.has(session_id)) {
-                warningToastFiredSessions.add(session_id);
-                api.ui.toast({
-                  variant: "warning",
-                  title: "Cache nearly cold",
-                  message: "Cache expires in <1 min. Answer or dismiss the question soon to avoid the cold-start tax.",
-                  duration: 60_000, // ~1 min — naturally clears around the cold transition
-                });
-              }
-              if (currentCacheState === "cold" && !coldToastFiredSessions.has(session_id)) {
-                coldToastFiredSessions.add(session_id);
-                api.ui.toast({
-                  variant: "info",
-                  title: "Cache cold",
-                  message: "Cache has expired while a question is pending. Consider starting a fresh chat (✨ New chat) instead of answering to avoid paying the cold-start tax.",
-                  duration: 300_000, // 5 min — long enough to catch a returning user
-                });
-              }
-            } else {
-              // Question resolved (or never existed). Re-arm both dedupes so
-              // the next pending-question episode gets a fresh pair of toasts.
-              // Cheap to call every tick; Set.delete is a no-op when absent.
-              warningToastFiredSessions.delete(session_id);
-              coldToastFiredSessions.delete(session_id);
-            }
+            // NOTE: interaction-pending toasts (Question/permission cold-cache
+            // warnings) are NOT fired here. The per-slot ticker is suspended
+            // while a prompt modal is open — exactly when those toasts matter —
+            // so they are driven by the module-level interactionWatcher instead.
           } catch (err) {
             console.error("[Cache-Timer Error]", err);
           }
