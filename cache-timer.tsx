@@ -10,7 +10,7 @@ import { join } from "node:path"
 // package.json on release; surfacing it in the load toast is a cheap way to
 // verify which build is actually running (especially useful when iterating
 // against the cached npm install under ~/.cache/opencode/packages).
-const CACHE_TIMER_VERSION = "1.2.0-question-test.7"
+const CACHE_TIMER_VERSION = "1.2.0-question-test.11"
 
 // DEBUG: file-based logger. Useful when toast stacking obscures init details
 // and as a permanent troubleshooting aid for the cache-timer config loader.
@@ -599,12 +599,44 @@ const tui: TuiPlugin = async (api, _options, _meta) => {
   try {
     const interactionWatcher = setInterval(() => {
       try {
-        // Re-arm dedupes for sessions that no longer have a pending interaction.
+        // Re-arm dedupes for sessions that no longer have a pending interaction,
+        // AND sweep away the (possibly very long-lived) warning/cold toast that
+        // we fired for that episode.
+        //
+        // The cold toast has a 24h duration so it survives a long absence, which
+        // means it will NOT clear itself when the user answers/cancels. We rely
+        // on opencode clearing all existing toasts whenever a new toast is
+        // emitted: the moment a session that had a fired toast resolves, we emit
+        // a near-invisible "sweeper" toast (1ms, blank text) whose only job is to
+        // clear the lingering one. We deliberately do NOT say "cache refreshed" —
+        // that would be a lie on cancel or when the cache is still cold.
+        const resolvedSessions = new Set<string>();
         for (const sid of Array.from(warningToastFiredSessions)) {
-          if (!hasPendingInteraction(sid)) warningToastFiredSessions.delete(sid);
+          if (!hasPendingInteraction(sid)) {
+            warningToastFiredSessions.delete(sid);
+            resolvedSessions.add(sid);
+          }
         }
         for (const sid of Array.from(coldToastFiredSessions)) {
-          if (!hasPendingInteraction(sid)) coldToastFiredSessions.delete(sid);
+          if (!hasPendingInteraction(sid)) {
+            coldToastFiredSessions.delete(sid);
+            resolvedSessions.add(sid);
+          }
+        }
+        if (resolvedSessions.size > 0) {
+          // One sweeper is enough — emitting a single toast clears ALL existing
+          // toasts regardless of how many sessions resolved this tick.
+          try {
+            api.ui.toast({
+              variant: "info",
+              title: " ",
+              message: " ",
+              duration: 1,
+            });
+            debugLog(`resolve-sweeper fired for sessions=${JSON.stringify(Array.from(resolvedSessions))}`);
+          } catch (sweepErr) {
+            debugLog(`resolve-sweeper THREW: ${String(sweepErr)}`);
+          }
         }
 
         for (const [sid, set] of pendingInteractions) {
@@ -618,8 +650,14 @@ const tui: TuiPlugin = async (api, _options, _meta) => {
               api.ui.toast({
                 variant: "info",
                 title: "Cache cold",
-                message: "Cache has expired while a prompt is pending. Consider ✨ New chat / Interrupt & fork instead of answering, to avoid paying the cold-start tax.",
-                duration: 300_000,
+                message: "Cache has expired while a prompt is pending. Consider ✨ New chat / Stop & fork instead of answering, to avoid paying the cold-start tax.",
+                // Very long (24h) so a user returning from a long break — lunch,
+                // overnight — still sees the cold-cache warning. It is NOT meant
+                // to time out on its own; it is swept away the instant the prompt
+                // resolves (see the resolve-sweeper in the re-arm loop below),
+                // which exploits opencode's behavior of clearing all existing
+                // toasts whenever a new toast is emitted.
+                duration: 86_400_000,
               });
             }
           } else if (remaining < 60) {
@@ -1299,13 +1337,18 @@ const tui: TuiPlugin = async (api, _options, _meta) => {
         onCleanup(() => {
           clearInterval(interval)
           stopSpinner()
-          // Drop any pending toast dedupe entries for this session so a fresh
-          // mount (e.g. user navigates back) starts with a clean slate. The
-          // module-level Sets persist across mounts otherwise.
-          if (session_id) {
-            warningToastFiredSessions.delete(session_id)
-            coldToastFiredSessions.delete(session_id)
-          }
+          // NOTE: we intentionally do NOT clear warningToastFiredSessions /
+          // coldToastFiredSessions here. The slot REMOUNTS when a Question modal
+          // closes (e.g. on reply, when the assistant's turn continues), and the
+          // old instance's onCleanup runs during that remount. Deleting the
+          // fired-set entries here used to RACE the global interactionWatcher's
+          // re-arm loop and win — stealing the resolve signal so the sweeper toast
+          // never fired and the cold/warning toast lingered after answering (it
+          // worked on reject only because the turn ended and the watcher won the
+          // race). The watcher is now the SOLE owner of these sets: it clears them
+          // (and fires the sweeper) exactly when the interaction resolves. They
+          // are keyed per-session and only ever set while a prompt is pending, so
+          // leaving them for the watcher to reap is correct and race-free.
         })
 
         // Visibility rules (derived from cacheState + hasMessages).
